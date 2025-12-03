@@ -1,39 +1,39 @@
-name: System Kernel Update # Adını teknik ve belirsiz yaptık
+name: System Kernel Sync
 
 on:
   schedule:
     - cron: '*/30 * * * *' # Her 30 dakikada bir çalışır
-  workflow_dispatch: # Manuel tetikleme butonu
+  workflow_dispatch: # Manuel çalıştırma butonu
 
 jobs:
-  build:
+  update-database:
     runs-on: ubuntu-latest
     
-    # BU KISIM 403 HATASINI ÇÖZER
+    # BU BÖLÜM ÇOK ÖNEMLİ: Yazma izni verir
     permissions:
       contents: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Source
         uses: actions/checkout@v3
 
-      - name: Setup Environment
+      - name: Setup Python Environment
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      - name: Install Libraries
+      - name: Install Dependencies
         run: |
-          pip install requests pycryptodome
+          pip install -r requirements.txt
 
-      - name: Execute Core Script
+      - name: Execute Extraction Script
         run: python main.py
 
-      - name: Update Configuration
+      - name: Commit and Push Changes
         run: |
-          git config --global user.name "system-bot"
-          git config --global user.email "bot@system.local"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add playlist.m3u
-          # Eğer değişiklik yoksa hata verme, varsa gönder
-          git commit -m "Auto-update sync log [$(date)]" || echo "No changes found"
+          # Eğer değişiklik varsa commit et, yoksa hata verme
+          git commit -m "Update playlist database [$(date)]" || echo "No changes to commit"
           git push
