@@ -1,8 +1,8 @@
-name: DiziPal Browser Sync
+name: DiziPal Selenium Sync
 
 on:
   schedule:
-    - cron: '0 */2 * * *' # 2 saatte bir
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 jobs:
@@ -10,26 +10,33 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    
     steps:
       - uses: actions/checkout@v3
-      
+
+      # 1. Sanal Ekran Kurulumu (Anti-Detect için Kritik)
+      - name: Install Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10' # DrissionPage için 3.10+ iyidir
+          python-version: '3.9'
 
       - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      # 2. Scripti Sanal Ekranla Çalıştır
+      - name: Run Scraper with Display
         run: |
-          pip install -r requirements.txt
-          # DrissionPage bazen Chromium indirmezse diye manuel tetikleyici (Gerekirse)
-          
-      - name: Run Scraper
-        run: python main.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python main.py
 
       - name: Commit & Push
         run: |
           git config --global user.name "Bot"
           git config --global user.email "bot@local"
           git add playlist.m3u
-          git commit -m "Update" || echo "No changes"
+          git commit -m "Playlist updated" || echo "No changes"
           git push
