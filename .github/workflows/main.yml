@@ -1,29 +1,36 @@
-name: DiziPal Network Sync
+name: System Sync
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *' # Her 30 dakikada bir çalıştır
+  workflow_dispatch: # Manuel çalıştırma butonu
 
 jobs:
-  sync:
+  update-playlist:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # Botun repoya yazma izni
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+
       - name: Install Dependencies
         run: pip install -r requirements.txt
+
       - name: Run Scraper
         run: python main.py
-      - name: Commit & Push
+
+      - name: Commit and Push
         run: |
           git config --global user.name "bot"
           git config --global user.email "bot@github.com"
           git add playlist.m3u
-          git commit -m "Playlist updated" || echo "No changes"
-          git push```
+          # Eğer dosya değişmediyse hata vermeden devam et
+          git commit -m "Update ATV playlist" || echo "No changes to commit"
+          git push
