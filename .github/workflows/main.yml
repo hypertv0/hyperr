@@ -1,36 +1,25 @@
-name: Auto Playlist Sync
+name: DiziPal Sync
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Her 30 dk'da bir çalışır
-  workflow_dispatch: # Manuel tetikleme
+    - cron: '0 */1 * * *' # Her saat başı çalışsın (Siteyi çok yormamak için)
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    # Yazma izni çok önemlidir
     permissions:
       contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
-      - name: Install Dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run Crawler
-        run: python main.py
-
-      - name: Push Changes
-        run: |
-          git config --global user.name "bot"
-          git config --global user.email "bot@github.com"
+      - run: pip install -r requirements.txt
+      - run: python main.py
+      - run: |
+          git config --global user.name "DiziBot"
+          git config --global user.email "bot@dizi.local"
           git add playlist.m3u
           git commit -m "Playlist update" || echo "No changes"
           git push
