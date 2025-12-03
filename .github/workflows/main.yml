@@ -1,8 +1,8 @@
-name: DiziPal SeleniumBase
+name: DiziPal Ultimate
 
 on:
   schedule:
-    - cron: '0 */3 * * *' # 3 saatte bir
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 jobs:
@@ -14,34 +14,32 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10' # SeleniumBase 3.10 sever
-
-      # 1. Gerekli sistem kütüphanelerini kur (Chrome için)
-      - name: Install Linux Deps
+      # 1. Chrome ve Sanal Ekran (Xvfb) Kurulumu
+      - name: Install System Deps
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb google-chrome-stable
 
-      # 2. Python Kütüphaneleri
-      - name: Install Python Libs
-        run: |
-          pip install -r requirements.txt
-          # SeleniumBase driverlarını yükle
-          sbase install chromedriver
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-      # 3. Scripti Sanal Ekran (Xvfb) ile Çalıştır
-      # Bu sayede tarayıcı GUI varmış gibi açılır ve CF geçer.
+      # 2. Kütüphaneleri Kur
+      - name: Install Python Libs
+        run: pip install -r requirements.txt
+
+      # 3. Scripti Sanal Ekran ile Çalıştır
+      # --headless=new kullanmamıza rağmen xvfb ile çalıştırmak 
+      # Cloudflare'in "ekran kartı yok" tespitini yanıltır.
       - name: Run Scraper
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py
 
       - name: Commit & Push
         run: |
-          git config --global user.name "System"
-          git config --global user.email "sys@local"
+          git config --global user.name "Bot"
+          git config --global user.email "bot@local"
           git add playlist.m3u
-          git commit -m "DB update" || echo "No changes"
+          git commit -m "Update" || echo "No changes"
           git push
