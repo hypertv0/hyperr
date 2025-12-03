@@ -3,7 +3,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import requests
-from bs4 import BeautifulSoup
 import json
 import re
 import base64
@@ -15,6 +14,8 @@ from Crypto.Hash import SHA512
 import sys
 import time
 import random
+import subprocess
+import os
 
 # --- AYARLAR ---
 PASSPHRASE = "3hPn4uCjTVtfYWcjIcoJQ4cL1WWk1qxXI39egLYOmNv6IblA7eKJz68uU3eLzux1biZLCms0quEjTYniGv5z1JcKbNIsDQFSeIZOBZJz4is6pD7UyWDggWWzTLBQbHcQFpBQdClnuQaMNUHtLHTpzCvZy33p6I7wFBvL4fnXBYH84aUIyWGTRvM2G5cfoNf4705tO2kv"
@@ -67,33 +68,52 @@ class SessionManager:
         except: pass
         return DEFAULT_DOMAIN
 
+    def get_chrome_major_version(self):
+        """Sistemdeki Chrome versiyonunu bulur"""
+        try:
+            # Linux/Ubuntu komutu
+            result = subprocess.check_output(['google-chrome', '--version']).decode('utf-8')
+            # Çıktı örneği: "Google Chrome 142.0.7444.175"
+            version = result.strip().split()[-1].split('.')[0]
+            print(f"[-] Tespit edilen Chrome Sürümü: {version}")
+            return int(version)
+        except Exception as e:
+            print(f"[UYARI] Chrome sürümü algılanamadı ({e}), varsayılan kullanılıyor.")
+            return None
+
     def get_tokens_via_selenium(self):
         print("[-] Selenium başlatılıyor (Anti-Detect Mod)...")
         
+        # Sürüm çakışmasını önlemek için sistemdeki versiyonu al
+        chrome_ver = self.get_chrome_major_version()
+
         options = uc.ChromeOptions()
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
-        # Not: Headless mod Cloudflare tarafından tespit edilebilir.
-        # Github Actions'da Xvfb kullanarak "headful" gibi çalıştıracağız.
+        options.add_argument('--window-size=1920,1080')
         
-        driver = uc.Chrome(options=options, version_main=None)
+        try:
+            # version_main parametresi ile sürüm çakışmasını engelliyoruz
+            driver = uc.Chrome(options=options, version_main=chrome_ver)
+        except Exception as e:
+            print(f"[FATAL] Driver başlatılamadı: {e}")
+            return False
         
         try:
             print(f"[-] Siteye gidiliyor: {self.domain}")
             driver.get(self.domain)
             
-            # Cloudflare'in geçmesini bekle (cKey inputu gelene kadar)
-            print("[-] Cloudflare/Site yüklenmesi bekleniyor...")
+            print("[-] Cloudflare/Site yüklenmesi bekleniyor (Max 45sn)...")
             try:
-                # 30 saniye boyunca cKey inputunu bekle
-                WebDriverWait(driver, 30).until(
+                # Bekleme süresini artırdık
+                WebDriverWait(driver, 45).until(
                     EC.presence_of_element_located((By.NAME, "cKey"))
                 )
                 print("[OK] Site başarıyla yüklendi!")
             except:
                 print("[FATAL] Site yüklenemedi veya Cloudflare aşılamadı.")
-                print(f"Sayfa Başlığı: {driver.title}")
-                # driver.save_screenshot("error.png") # Debug için
+                # Hata ayıklama için sayfa kaynağının başını yazdır
+                print(f"Title: {driver.title}")
                 return False
 
             # Verileri Çek
@@ -101,7 +121,6 @@ class SessionManager:
             self.cValue = driver.find_element(By.NAME, "cValue").get_attribute("value")
             self.user_agent = driver.execute_script("return navigator.userAgent;")
             
-            # Cookie'leri requests formatına çevir
             selenium_cookies = driver.get_cookies()
             for cookie in selenium_cookies:
                 self.cookies[cookie['name']] = cookie['value']
@@ -113,7 +132,10 @@ class SessionManager:
             print(f"[HATA] Selenium işleminde hata: {e}")
             return False
         finally:
-            driver.quit()
+            try:
+                driver.quit()
+            except:
+                pass
 
 class DiziCrawler:
     def __init__(self, session_data):
@@ -149,7 +171,6 @@ class DiziCrawler:
                 try:
                     html = r.json().get('data', {}).get('html', '')
                     items = []
-                    # Regex ile hızlı parse
                     matches = re.findall(r'href="([^"]+)".*?text-white text-sm">([^<]+)', html, re.DOTALL)
                     for link, title in matches:
                         full_link = link if link.startswith("http") else f"{self.domain}{link}"
@@ -174,10 +195,8 @@ class DiziCrawler:
                         iframe_url = iframe_match.group(1)
                         if not iframe_url.startswith("http"): iframe_url = self.domain + iframe_url
                         
-                        # İframe'e istek at
                         r2 = self.session.get(iframe_url, headers={"Referer": self.domain}, timeout=10)
                         
-                        # M3U8/MP4 bul
                         m3u = re.search(r'file:\s*["\']([^"\']+\.(?:m3u8|mp4)[^"\']*)["\']', r2.text)
                         if m3u: return m3u.group(1)
                         
@@ -202,15 +221,13 @@ def worker(crawler, item, category):
     return None
 
 def main():
-    print("--- DiziPal Hybrid Sync ---")
+    print("--- DiziPal Hybrid Sync V2 ---")
     
-    # 1. Adım: Selenium ile Giriş
     mgr = SessionManager()
     if not mgr.get_tokens_via_selenium():
         sys.exit(1)
         
-    # 2. Adım: Requests ile Hızlı Tarama
-    print("[-] Tokenlar alındı, tarayıcı kapatıldı. Hızlı tarama başlıyor...")
+    print("[-] Tokenlar alındı, hızlı tarama başlıyor...")
     crawler = DiziCrawler(mgr)
     
     playlist = []
@@ -224,9 +241,12 @@ def main():
                 futures.append(executor.submit(worker, crawler, item, cat['name']))
         
         print(f"[-] {len(futures)} içerik detayları çözülüyor...")
+        completed = 0
         for f in concurrent.futures.as_completed(futures):
             res = f.result()
             if res: playlist.append(res)
+            completed += 1
+            if completed % 20 == 0: print(f"    İlerleme: {completed}/{len(futures)}")
 
     if playlist:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
