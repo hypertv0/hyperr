@@ -5,136 +5,140 @@ import concurrent.futures
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 import sys
+import re
 import urllib3
 
 # SSL Uyarılarını Kapat
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- SABİT AYARLAR (Smali Analizinden) ---
+# --- YAPILANDIRMA ---
 STATIC_AES_KEY = "ywevqtjrurkwtqgz"
 USER_AGENT = "speedrestapi"
 X_REQUESTED_WITH = "com.bp.box"
 REFERER_URL = "https://speedrestapi.com/"
 
-# Kaynak URL'ler
+# Kaynaklar
 PRIMARY_URL = "https://prod-eu-central.pages.dev/a03c6a7ae48351c6408e00c8159e6e64/certificates/client.pem"
 FALLBACK_URL = "https://static.staticsave.com/conn/ct.js"
 
+# Eğer otomatik bulma çalışmazsa denenecek acil durum adresleri
+EMERGENCY_DOMAINS = [
+    "http://inattv20.cf",
+    "http://inattv38.xyz",
+    "http://inattv50.cf"
+]
+
 OUTPUT_FILE = "playlist.m3u"
-MAX_WORKERS = 25
+MAX_WORKERS = 20
 
 class InatCrypto:
     def __init__(self):
         self.block_size = AES.block_size
 
-    def safe_base64_decode(self, data):
-        """Java Base64.decode toleransını simüle eder."""
-        if not data: return None
-        # Gereksiz karakterleri temizle
-        data = data.replace('\n', '').replace('\r', '').strip()
-        # Padding ekle
-        missing_padding = len(data) % 4
-        if missing_padding:
-            data += '=' * (4 - missing_padding)
-        try:
-            return base64.b64decode(data)
-        except:
-            return None
-
     def decrypt(self, encrypted_text, key_text):
-        """
-        Smali: InatBoxModelsKt.decryptAES
-        AES-128-CBC, Key = IV
-        """
+        """Esnek şifre çözme: Hata olsa bile veriyi kurtarmaya çalışır."""
         try:
             if not encrypted_text or not key_text: return None
             
-            key_bytes = key_text.encode('utf-8')
-            iv_bytes = key_bytes # Smali kodunda IV, Key ile aynıdır
+            key = key_text.encode('utf-8')
+            iv = key # IV = Key
             
-            encrypted_bytes = self.safe_base64_decode(encrypted_text)
-            if not encrypted_bytes: return None
-
-            cipher = AES.new(key_bytes, AES.MODE_CBC, iv_bytes)
-            decrypted_bytes = unpad(cipher.decrypt(encrypted_bytes), self.block_size)
+            # Base64 temizliği
+            encrypted_text = encrypted_text.strip().replace('\n', '').replace('\r', '')
+            pad = len(encrypted_text) % 4
+            if pad:
+                encrypted_text += '=' * (4 - pad)
             
-            return decrypted_bytes.decode('utf-8')
-        except Exception:
+            cipher = AES.new(key, AES.MODE_CBC, iv)
+            decoded = base64.b64decode(encrypted_text)
+            
+            # Padding hatası olsa bile decrypt edilmiş ham veriyi al
+            decrypted_raw = cipher.decrypt(decoded)
+            
+            # Padding'i manuel temizle (PKCS7) veya text decode et
+            try:
+                return unpad(decrypted_raw, self.block_size).decode('utf-8')
+            except:
+                # Padding bozuksa utf-8 decode edip "printable" karakterleri al
+                return decrypted_raw.decode('utf-8', errors='ignore').strip()
+                
+        except Exception as e:
             return None
 
-class InatResolver:
-    def __init__(self, crypto, session):
-        self.crypto = crypto
+class InatDomainFinder:
+    def __init__(self, session, crypto):
         self.session = session
+        self.crypto = crypto
 
-    def get_domain(self):
-        # Adım 1: Client.pem (Çift Katmanlı Şifreleme)
-        print("[-] Yöntem 1 (Client.pem) deneniyor...")
+    def extract_url_via_regex(self, text):
+        """Metin içindeki http/https linkini bulur."""
+        if not text: return None
+        # URL regex (basit)
+        match = re.search(r'(https?://[a-zA-Z0-9.-]+(?:\.[a-zA-Z]{2,})+(?::\d+)?)', text)
+        if match:
+            return match.group(1)
+        return None
+
+    def find(self):
+        domain = None
+        
+        # 1. Yöntem: Client.pem
+        print("[-] Kaynak 1 (Client.pem) taranıyor...")
         try:
-            r = self.session.get(PRIMARY_URL, verify=False, timeout=15)
+            r = self.session.get(PRIMARY_URL, verify=False, timeout=10)
             if r.status_code == 200:
-                raw = r.text.replace("-----BEGIN CERTIFICATE-----", "").replace("-----END CERTIFICATE-----", "").strip()
-                parts = raw.split(':')
+                content = r.text.replace("-----BEGIN CERTIFICATE-----", "").replace("-----END CERTIFICATE-----", "").strip()
+                parts = content.split(':')
                 if len(parts) >= 2:
                     # Katman 1
-                    cipher_text = parts[0]
-                    dynamic_key = parts[1]
-                    layer1 = self.crypto.decrypt(cipher_text, dynamic_key)
-                    
-                    if layer1:
-                        l1_parts = layer1.split(':')
+                    l1 = self.crypto.decrypt(parts[0], parts[1])
+                    if l1:
+                        l1_parts = l1.split(':')
                         if len(l1_parts) >= 2:
                             # Katman 2
-                            final_json = self.crypto.decrypt(l1_parts[0], l1_parts[1])
-                            if final_json:
-                                try:
-                                    data = json.loads(final_json)
-                                    if "DC10" in data:
-                                        print(f"[+] Domain Bulundu (Client.pem): {data['DC10']}")
-                                        return data['DC10']
-                                except: pass
+                            final = self.crypto.decrypt(l1_parts[0], l1_parts[1])
+                            # JSON parse deneme
+                            try:
+                                data = json.loads(final)
+                                if "DC10" in data: domain = data["DC10"]
+                            except:
+                                # JSON değilse Regex ile URL ara
+                                domain = self.extract_url_via_regex(final)
         except Exception as e:
-            print(f"[!] Yöntem 1 hatası: {e}")
+            print(f"    Hata: {e}")
 
-        # Adım 2: Fallback (ct.js)
-        print("[-] Yöntem 2 (Fallback ct.js) deneniyor...")
+        if domain: return domain
+
+        # 2. Yöntem: Fallback ct.js
+        print("[-] Kaynak 2 (ct.js) taranıyor...")
         try:
-            r = self.session.get(FALLBACK_URL, verify=False, timeout=15)
+            r = self.session.get(FALLBACK_URL, verify=False, timeout=10)
             if r.status_code == 200:
                 content = r.text.strip()
                 
-                # Durum A: Direkt URL
-                if content.startswith("http"):
-                    print(f"[+] Domain Bulundu (Plain Text): {content}")
-                    return content
-
-                # Durum B: JSON {"DC10": "..."}
-                try:
-                    data = json.loads(content)
-                    if "DC10" in data:
-                        print(f"[+] Domain Bulundu (JSON): {data['DC10']}")
-                        return data['DC10']
-                except: pass
-
-                # Durum C: Şifreli Metin (Statik Key ile)
-                decrypted = self.crypto.decrypt(content, STATIC_AES_KEY)
-                if decrypted:
-                    if decrypted.startswith("http"):
-                        print(f"[+] Domain Bulundu (Decrypted Text): {decrypted}")
-                        return decrypted
-                    try:
-                        data = json.loads(decrypted)
-                        if "DC10" in data:
-                            print(f"[+] Domain Bulundu (Decrypted JSON): {data['DC10']}")
-                            return data['DC10']
-                    except: pass
+                # A: Direkt metin içinde URL var mı?
+                domain = self.extract_url_via_regex(content)
+                
+                # B: Şifreli olabilir, çözüp bakalım
+                if not domain:
+                    decrypted = self.crypto.decrypt(content, STATIC_AES_KEY)
+                    if decrypted:
+                        # JSON mu?
+                        try:
+                            data = json.loads(decrypted)
+                            if "DC10" in data: domain = data["DC10"]
+                        except:
+                            pass
+                        # Değilse Regex ile URL ara
+                        if not domain:
+                            domain = self.extract_url_via_regex(decrypted)
 
         except Exception as e:
-            print(f"[!] Yöntem 2 hatası: {e}")
+            print(f"    Hata: {e}")
 
-        return None
+        return domain
 
-class InatScraper:
+class InatProcessor:
     def __init__(self):
         self.crypto = InatCrypto()
         self.session = requests.Session()
@@ -145,50 +149,56 @@ class InatScraper:
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
         })
         
-        resolver = InatResolver(self.crypto, self.session)
-        self.domain = resolver.get_domain()
-        
-        if self.domain:
-            self.domain = self.domain.rstrip('/')
+        # Domain Bulma Süreci
+        finder = InatDomainFinder(self.session, self.crypto)
+        self.base_url = finder.find()
 
-    def request_api(self, path=""):
-        if not self.domain: return None
+        # Eğer hala bulunamadıysa acil durum listesini dene
+        if not self.base_url:
+            print("[!] Dinamik domain bulunamadı, acil durum listesi deneniyor...")
+            for url in EMERGENCY_DOMAINS:
+                print(f"    Deneniyor: {url}")
+                try:
+                    # Test isteği atalım
+                    test = self.make_request(url, "")
+                    if test: 
+                        self.base_url = url
+                        print(f"[+] Çalışan acil durum domaini: {url}")
+                        break
+                except:
+                    continue
         
-        url = f"{self.domain}/{path.lstrip('/')}"
-        # API static dosya ise (örn: .php değilse) GET, yoksa POST
-        # Ancak Inat genelde POST ve şifreli body ister
+        if self.base_url:
+            self.base_url = self.base_url.rstrip('/')
+
+    def make_request(self, domain, path):
+        url = f"{domain}/{path.lstrip('/')}"
         payload = f"1={STATIC_AES_KEY}&0={STATIC_AES_KEY}"
-        
         try:
-            # Smali: makeInatRequest her zaman POST atar
-            resp = self.session.post(url, data=payload, verify=False, timeout=20)
+            r = self.session.post(url, data=payload, verify=False, timeout=15)
+            if r.status_code != 200: return None
             
-            if resp.status_code != 200: return None
-            
-            text = resp.text
-            if not text: return None
-
-            # Yanıt şifreli mi? (İki nokta üst üste içerir: Data:Key)
-            if ":" in text:
-                parts = text.split(':')
-                # Katman 1
-                layer1 = self.crypto.decrypt(parts[0], STATIC_AES_KEY)
-                if not layer1: return None
+            # Yanıt şifreli mi?
+            if ":" in r.text:
+                parts = r.text.split(':')
+                l1 = self.crypto.decrypt(parts[0], STATIC_AES_KEY)
+                if not l1: return None
                 
-                # Katman 2
-                l1_parts = layer1.split(':')
+                l1_parts = l1.split(':')
                 if len(l1_parts) < 1: return None
                 
-                final_json = self.crypto.decrypt(l1_parts[0], STATIC_AES_KEY)
-                return json.loads(final_json) if final_json else None
+                final = self.crypto.decrypt(l1_parts[0], STATIC_AES_KEY)
+                return json.loads(final) if final else None
             else:
-                # Şifresiz JSON dönmüş olabilir (Nadir)
-                return json.loads(text)
-                
-        except Exception:
+                return json.loads(r.text)
+        except:
             return None
 
-    def process_content(self, item, category):
+    def get_api_data(self, path=""):
+        if not self.base_url: return None
+        return self.make_request(self.base_url, path)
+
+    def parse_content(self, item, category):
         try:
             name = item.get('chName', item.get('diziName', 'Bilinmeyen'))
             img = item.get('chImg', item.get('diziImg', ''))
@@ -197,87 +207,81 @@ class InatScraper:
             
             final_url = ""
             
-            # 1. Tip: Doğrudan Linkler
+            # Canlı Yayın / Direkt Link
             if ctype in ['live_url', 'web', 'link', 'tekli_regex_lb_sh_3']:
                 final_url = url
             
-            # 2. Tip: Detay Gerektirenler
+            # Dizi / Film (Detay İsteği)
             elif ctype in ['dizi', 'film'] or (url and url.endswith('.php')):
-                detail_data = self.request_api(url)
-                if detail_data:
-                    if isinstance(detail_data, list) and len(detail_data) > 0:
-                        final_url = detail_data[0].get('diziUrl', detail_data[0].get('chUrl', ''))
-                    elif isinstance(detail_data, dict):
-                        final_url = detail_data.get('diziUrl', detail_data.get('chUrl', ''))
+                det = self.get_api_data(url)
+                if det:
+                    if isinstance(det, list) and det:
+                        final_url = det[0].get('diziUrl', det[0].get('chUrl', ''))
+                    elif isinstance(det, dict):
+                        final_url = det.get('diziUrl', det.get('chUrl', ''))
             
-            # Link Kontrolü ve Temizliği
             if final_url and final_url.startswith("http"):
-                if any(x in final_url for x in ["yandex", "vk.com", "drive.google"]):
-                    return None # Desteklenmeyen kaynak
+                if any(x in final_url for x in ["yandex", "vk.com", "drive.google"]): return None
                 
                 m3u = f'#EXTINF:-1 tvg-logo="{img}" group-title="{category}",{name}\n'
                 m3u += f'#EXTVLCOPT:http-user-agent={USER_AGENT}\n'
                 m3u += f'#EXTVLCOPT:http-referrer={REFERER_URL}\n'
                 m3u += f"{final_url}\n"
                 return m3u
-
         except:
             pass
         return None
 
 def main():
-    scraper = InatScraper()
-    if not scraper.domain:
-        print("[!!!] Domain bulunamadı. Çıkılıyor.")
+    print("--- SİSTEM BAŞLATILIYOR ---")
+    bot = InatProcessor()
+    
+    if not bot.base_url:
+        print("[FATAL] Hiçbir domain çalışmadı. İşlem iptal.")
         sys.exit(1)
         
-    print("[-] Kategoriler indiriliyor...")
-    categories = scraper.request_api("")
+    print(f"[SUCCESS] Hedef Domain: {bot.base_url}")
     
-    if not categories:
-        print("[!!!] Kategori listesi boş veya şifre çözülemedi.")
+    cats = bot.get_api_data("")
+    if not cats:
+        print("[FATAL] Kategori listesi boş.")
         sys.exit(1)
-
-    print(f"[-] {len(categories)} kategori bulundu.")
+        
+    print(f"[-] {len(cats)} kategori bulundu. Tarama başlıyor...")
     
-    results = []
+    playlist = []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = []
-        for cat in categories:
-            c_name = cat.get('catName', 'Genel')
-            c_url = cat.get('catUrl', '')
+        for c in cats:
+            c_name = c.get('catName', 'Genel')
+            c_url = c.get('catUrl', '')
             
-            if not c_url or any(x in c_name for x in ["Hata", "Destek", "Telegram"]):
+            if not c_url or any(bad in c_name for bad in ["Hata", "Destek", "Telegram"]):
                 continue
             
-            # Kategori içeriğini al
-            print(f"   > Taranıyor: {c_name}")
-            channels = scraper.request_api(c_url)
+            print(f"   > Kategori İndiriliyor: {c_name}")
+            items = bot.get_api_data(c_url)
             
-            if channels and isinstance(channels, list):
-                for ch in channels:
-                    futures.append(executor.submit(scraper.process_content, ch, c_name))
+            if items and isinstance(items, list):
+                for i in items:
+                    futures.append(ex.submit(bot.parse_content, i, c_name))
         
-        print(f"[-] {len(futures)} içerik işleniyor...")
+        print(f"[-] {len(futures)} içerik için detay taraması yapılıyor...")
         
-        count = 0
-        for f in concurrent.futures.as_completed(futures):
+        for i, f in enumerate(concurrent.futures.as_completed(futures)):
             res = f.result()
-            if res:
-                results.append(res)
-            count += 1
-            if count % 100 == 0:
-                print(f"    İlerleme: {count}/{len(futures)}")
+            if res: playlist.append(res)
+            if i % 50 == 0: print(f"    İşlenen: {i}/{len(futures)}")
 
-    if results:
+    if playlist:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
-            for line in results:
-                f.write(line)
-        print(f"[BAŞARILI] {len(results)} içerik {OUTPUT_FILE} dosyasına yazıldı.")
+            for p in playlist:
+                f.write(p)
+        print(f"\n[BİTTİ] {len(playlist)} içerik {OUTPUT_FILE} dosyasına kaydedildi.")
     else:
-        print("[UYARI] Hiçbir link bulunamadı.")
+        print("\n[UYARI] Liste boş kaldı.")
 
 if __name__ == "__main__":
     main()
