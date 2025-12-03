@@ -1,39 +1,38 @@
-name: System Kernel Sync
+name: System Cache Update
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Her 30 dakikada bir çalışır
-  workflow_dispatch: # Manuel çalıştırma butonu
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
-  update-database:
+  sync-process:
     runs-on: ubuntu-latest
     
-    # BU BÖLÜM ÇOK ÖNEMLİ: Yazma izni verir
+    # GitHub Action Bot'a yazma izni verir (Önemli!)
     permissions:
       contents: write
 
     steps:
-      - name: Checkout Source
+      - name: Load Repository
         uses: actions/checkout@v3
 
-      - name: Setup Python Environment
+      - name: Initialize Environment
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      - name: Install Dependencies
+      - name: Install Modules
         run: |
           pip install -r requirements.txt
 
-      - name: Execute Extraction Script
+      - name: Run Synchronization
         run: python main.py
 
-      - name: Commit and Push Changes
+      - name: Push Updates
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "sys-bot"
+          git config --global user.email "bot@sys.internal"
           git add playlist.m3u
-          # Eğer değişiklik varsa commit et, yoksa hata verme
-          git commit -m "Update playlist database [$(date)]" || echo "No changes to commit"
+          git commit -m "Sync log update [$(date)]" || echo "No changes"
           git push
