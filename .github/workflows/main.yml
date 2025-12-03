@@ -1,45 +1,45 @@
-name: DiziPal Sitemap Sync
+name: DiziPal API Sync
 
 on:
   schedule:
-    - cron: '0 */4 * * *' # 4 saatte bir çalışsın (Sitemap büyük olabilir)
+    - cron: '0 */3 * * *'
   workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 300 # 5 Saat limit
     permissions:
       contents: write
-    
     steps:
       - uses: actions/checkout@v3
-
-      # Chrome ve Xvfb Kurulumu
+      
+      # 1. Sistem Bağımlılıkları (DrissionPage için)
       - name: Install System Deps
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb google-chrome-stable
 
+      # 2. Python Kurulumu
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install Python Libs
+      # 3. PIP Paketlerini Yükle
+      - name: Install Requirements
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
-          sbase install chromedriver
 
-      # Sanal Ekran ile Çalıştır
+      # 4. Kodları Çalıştır
       - name: Run Scraper
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py
 
+      # 5. Kaydet ve Gönder
       - name: Commit & Push
         run: |
           git config --global user.name "Bot"
           git config --global user.email "bot@local"
           git add playlist.m3u
-          git commit -m "Playlist updated via Sitemap" || echo "No changes"
+          git commit -m "Update" || echo "No changes"
           git push
