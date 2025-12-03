@@ -1,20 +1,21 @@
-name: DiziPal Ultimate
+name: DiziPal Sitemap Sync
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 */4 * * *' # 4 saatte bir çalışsın (Sitemap büyük olabilir)
   workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 300 # 5 Saat limit
     permissions:
       contents: write
     
     steps:
       - uses: actions/checkout@v3
 
-      # 1. Chrome ve Sanal Ekran (Xvfb) Kurulumu
+      # Chrome ve Xvfb Kurulumu
       - name: Install System Deps
         run: |
           sudo apt-get update
@@ -25,13 +26,12 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 2. Kütüphaneleri Kur
       - name: Install Python Libs
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          sbase install chromedriver
 
-      # 3. Scripti Sanal Ekran ile Çalıştır
-      # --headless=new kullanmamıza rağmen xvfb ile çalıştırmak 
-      # Cloudflare'in "ekran kartı yok" tespitini yanıltır.
+      # Sanal Ekran ile Çalıştır
       - name: Run Scraper
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py
@@ -41,5 +41,5 @@ jobs:
           git config --global user.name "Bot"
           git config --global user.email "bot@local"
           git add playlist.m3u
-          git commit -m "Update" || echo "No changes"
+          git commit -m "Playlist updated via Sitemap" || echo "No changes"
           git push
