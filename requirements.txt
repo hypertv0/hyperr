@@ -1,4 +1,4 @@
-DrissionPage==4.0.4.22
+DrissionPage
 curl_cffi
 pycryptodome
 beautifulsoup4
