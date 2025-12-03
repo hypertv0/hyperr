@@ -1,8 +1,8 @@
-name: DiziPal Sync
+name: DiziPal Browser Sync
 
 on:
   schedule:
-    - cron: '0 */1 * * *' # Her saat başı çalışsın (Siteyi çok yormamak için)
+    - cron: '0 */2 * * *' # 2 saatte bir
   workflow_dispatch:
 
 jobs:
@@ -12,14 +12,24 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
-      - run: pip install -r requirements.txt
-      - run: python main.py
-      - run: |
-          git config --global user.name "DiziBot"
-          git config --global user.email "bot@dizi.local"
+          python-version: '3.10' # DrissionPage için 3.10+ iyidir
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          # DrissionPage bazen Chromium indirmezse diye manuel tetikleyici (Gerekirse)
+          
+      - name: Run Scraper
+        run: python main.py
+
+      - name: Commit & Push
+        run: |
+          git config --global user.name "Bot"
+          git config --global user.email "bot@local"
           git add playlist.m3u
-          git commit -m "Playlist update" || echo "No changes"
+          git commit -m "Update" || echo "No changes"
           git push
