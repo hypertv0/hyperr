@@ -1,300 +1,252 @@
 import requests
 import json
+import re
 import base64
 import concurrent.futures
+import urllib3
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
+from Crypto.Protocol.KDF import PBKDF2
+from Crypto.Hash import SHA512
 import sys
-import urllib3
 
-# SSL Uyarılarını Kapat (HTTPS sertifika hatalarını yoksaymak için)
+# SSL Hatalarını Gizle
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- YAPILANDIRMA ---
-# Smali kodundaki InatBox.kt'den alınan sabit anahtar
-STATIC_AES_KEY = "ywevqtjrurkwtqgz"
+# --- SABİTLER (Smali Kodlarından Alındı) ---
+PASSPHRASE = "3hPn4uCjTVtfYWcjIcoJQ4cL1WWk1qxXI39egLYOmNv6IblA7eKJz68uU3eLzux1biZLCms0quEjTYniGv5z1JcKbNIsDQFSeIZOBZJz4is6pD7UyWDggWWzTLBQbHcQFpBQdClnuQaMNUHtLHTpzCvZy33p6I7wFBvL4fnXBYH84aUIyWGTRvM2G5cfoNf4705tO2kv"
+DOMAIN_LIST_URL = "https://raw.githubusercontent.com/Kraptor123/domainListesi/refs/heads/main/eklenti_domainleri.txt"
+DEFAULT_DOMAIN = "https://dizipal1512.com"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/118.0"
 
-# Android cihaz taklidi yapan başlıklar
-HEADERS = {
-    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 10; SM-G973F Build/QP1A.190711.020)",
-    "X-Requested-With": "com.bp.box",
-    "Referer": "https://speedrestapi.com/",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "Accept": "*/*"
-}
-
-# Eklentideki Kaynaklar
-URL_CLIENT_PEM = "https://prod-eu-central.pages.dev/a03c6a7ae48351c6408e00c8159e6e64/certificates/client.pem"
-URL_CT_JS = "https://static.staticsave.com/conn/ct.js"
+# Kategori ID'leri (Smali kodundaki mainPageOf kısmından)
+CATEGORIES = [
+    {"id": "0", "name": "Yeni Eklenen Bölümler"},
+    {"id": "1", "name": "Exxen Dizileri"},
+    {"id": "6", "name": "Disney+ Dizileri"},
+    {"id": "10", "name": "Netflix Dizileri"},
+    {"id": "53", "name": "Amazon Dizileri"},
+    {"id": "54", "name": "Apple TV+ Dizileri"},
+    {"id": "66", "name": "Max Dizileri"},
+    {"id": "181", "name": "TOD Dizileri"},
+    {"id": "242", "name": "Tabii Dizileri"}
+]
 
 OUTPUT_FILE = "playlist.m3u"
-MAX_WORKERS = 25
+MAX_WORKERS = 10 # Siteyi yormamak için çok yüksek tutmuyoruz
 
-class CryptoUtils:
-    """Smali kodundaki InatBoxModelsKt.decryptAES fonksiyonunun Python karşılığı"""
+class DiziPalCrypto:
+    """Smali: DiziPalOrijinalKt.decrypt fonksiyonunun Python karşılığı"""
     def __init__(self):
-        self.block_size = AES.block_size
+        pass
 
-    def decrypt(self, encrypted_text, key_text):
+    def decrypt(self, salt_hex, iv_hex, ciphertext_b64):
         try:
-            if not encrypted_text or not key_text: return None
+            # Hex stringleri byte'a çevir
+            salt = bytes.fromhex(salt_hex)
+            iv = bytes.fromhex(iv_hex)
+            ciphertext = base64.b64decode(ciphertext_b64)
             
-            # Key ve IV aynıdır (Smali analizinden)
-            key_bytes = key_text.encode('utf-8')
-            iv_bytes = key_bytes 
+            # Anahtar Türetme (PBKDF2WithHmacSHA512)
+            # Android implementation uses 1000 iterations usually for this setup
+            key = PBKDF2(PASSPHRASE, salt, dkLen=32, count=1000, hmac_hash_module=SHA512)
             
-            # Base64 hatalarını toleranslı karşıla
-            encrypted_text = encrypted_text.strip().replace('\n', '').replace('\r', '')
-            pad = len(encrypted_text) % 4
-            if pad: encrypted_text += '=' * (4 - pad)
+            # AES Deşifreleme
+            cipher = AES.new(key, AES.MODE_CBC, iv)
+            decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
             
-            # Şifreyi çöz
-            cipher = AES.new(key_bytes, AES.MODE_CBC, iv_bytes)
-            decoded = base64.b64decode(encrypted_text)
-            decrypted_raw = cipher.decrypt(decoded)
-            
-            # Padding'i kaldır
-            try:
-                return unpad(decrypted_raw, self.block_size).decode('utf-8')
-            except:
-                # Padding bozuksa bile veriyi kurtarmaya çalış
-                return decrypted_raw.decode('utf-8', errors='ignore').strip()
-        except:
+            return decrypted.decode('utf-8')
+        except Exception as e:
+            # print(f"Decrypt Error: {e}")
             return None
 
-class DomainFinder:
-    """Sunucu adresini bulan sınıf"""
-    def __init__(self, session, crypto):
-        self.session = session
-        self.crypto = crypto
-
-    def check_api_validity(self, domain):
-        """Bir domainin geçerli Inat API olup olmadığını test eder"""
-        # Http ve Https olarak dene
-        protocols = [domain] if domain.startswith("http") else [f"https://{domain}", f"http://{domain}"]
-        
-        for url in protocols:
-            clean_url = url.rstrip('/')
-            try:
-                # API'ye boş istek atarak test et (Kategorileri döndürmeli)
-                payload = f"1={STATIC_AES_KEY}&0={STATIC_AES_KEY}"
-                r = self.session.post(f"{clean_url}/", data=payload, timeout=4, verify=False)
-                
-                # Eğer yanıt şifreliyse (:) veya JSON ise ({) bu doğru sunucudur
-                if r.status_code == 200 and (":" in r.text or "chName" in r.text):
-                    return clean_url
-            except:
-                continue
-        return None
+class DiziPalScraper:
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
+        })
+        self.crypto = DiziPalCrypto()
+        self.domain = self.get_domain()
+        self.cKey = None
+        self.cValue = None
 
     def get_domain(self):
-        # 1. Yöntem: Client.pem (Uygulamanın varsayılanı)
-        print("[-] Yöntem 1: Statik Dosya (Client.pem) kontrol ediliyor...")
+        print("[-] Domain listesi çekiliyor...")
         try:
-            r = self.session.get(URL_CLIENT_PEM, timeout=5, verify=False)
+            r = requests.get(DOMAIN_LIST_URL, timeout=10)
             if r.status_code == 200:
-                data = r.text.replace("-----BEGIN CERTIFICATE-----", "").replace("-----END CERTIFICATE-----", "").strip()
-                parts = data.split(':')
-                if len(parts) >= 2:
-                    # Çift katmanlı şifre çözme
-                    l1 = self.crypto.decrypt(parts[0], parts[1])
-                    if l1:
-                        p2 = l1.split(':')
-                        final = self.crypto.decrypt(p2[0], p2[1])
-                        js = json.loads(final)
-                        if "DC10" in js:
-                            valid = self.check_api_validity(js["DC10"])
-                            if valid: return valid
-        except Exception as e:
-            print(f"    Hata: {e}")
+                # Örnek veri: DiziPalOrijinal: https://dizipal1512.com | Diger: ...
+                content = r.text
+                parts = content.split('|')
+                for part in parts:
+                    if "DiziPalOrijinal" in part:
+                        domain = part.split(':', 1)[1].strip()
+                        print(f"[+] Güncel Domain: {domain}")
+                        return domain.rstrip('/')
+        except:
+            pass
+        print(f"[!] Domain bulunamadı, varsayılan kullanılıyor: {DEFAULT_DOMAIN}")
+        return DEFAULT_DOMAIN
 
-        # 2. Yöntem: ct.js (Uygulamanın yedeği)
-        print("[-] Yöntem 2: Yedek Dosya (ct.js) kontrol ediliyor...")
+    def init_session(self):
+        """Ana sayfaya gidip CSRF tokenları (cKey, cValue) ve Cookie alır."""
+        print("[-] Oturum başlatılıyor...")
         try:
-            r = self.session.get(URL_CT_JS, timeout=5, verify=False)
+            r = self.session.get(self.domain, timeout=15, verify=False)
             if r.status_code == 200:
-                content = r.text.strip()
-                # İçeriği direkt test et
-                valid = self.check_api_validity(content)
-                if valid: return valid
+                # HTML içinden cKey ve cValue bul
+                # Smali: input[name=cKey] ve input[name=cValue]
+                ckey_match = re.search(r'name="cKey" value="([^"]+)"', r.text)
+                cvalue_match = re.search(r'name="cValue" value="([^"]+)"', r.text)
                 
-                # Şifreliyse çözüp test et
-                dec = self.crypto.decrypt(content, STATIC_AES_KEY)
-                if dec:
-                    valid = self.check_api_validity(dec)
-                    if valid: return valid
+                if ckey_match and cvalue_match:
+                    self.cKey = ckey_match.group(1)
+                    self.cValue = cvalue_match.group(1)
+                    print(f"[+] Tokenlar alındı. cKey: {self.cKey[:5]}...")
+                    return True
         except Exception as e:
-            print(f"    Hata: {e}")
+            print(f"[!] Oturum hatası: {e}")
+        return False
 
-        # 3. Yöntem: BRUTE FORCE (GitHub IP'si engelliyse bu çalışır)
-        print("[-] Yöntem 3: Akıllı Tarama (Brute Force) başlatılıyor...")
+    def fetch_category_items(self, cat_id):
+        """Kategorideki dizileri çeker."""
+        if not self.cKey or not self.cValue: return []
         
-        # 125'ten 160'a kadar olası adresleri üret
-        candidates = []
-        for i in range(130, 160):
-            candidates.append(f"inattv{i}.xyz")
-            candidates.append(f"inattv{i}.link")
-            candidates.append(f"inattv{i}.com")
-            candidates.append(f"inattv{i}.cf")
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-            futures = [executor.submit(self.check_api_validity, domain) for domain in candidates]
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                if result:
-                    print(f"[!!!] Sunucu Bulundu: {result}")
-                    executor.shutdown(wait=False) # Diğerlerini durdur
-                    return result
-        
-        return None
-
-class InatCrawler:
-    def __init__(self):
-        self.crypto = CryptoUtils()
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
-        
-        finder = DomainFinder(self.session, self.crypto)
-        self.base_url = finder.get_domain()
-
-    def api_post(self, path=""):
-        """API'ye POST isteği atar ve yanıtı çözer"""
-        if not self.base_url: return None
-        
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        data = f"1={STATIC_AES_KEY}&0={STATIC_AES_KEY}"
+        url = f"{self.domain}/bg/getserielistbychannel"
+        # Smali'deki POST payload yapısı
+        payload = {
+            "cKey": self.cKey,
+            "cValue": self.cValue,
+            "curPage": "1", # Şimdilik sadece ilk sayfa
+            "channelId": cat_id,
+            "languageId": "2,3,4"
+        }
         
         try:
-            # İstek at
-            r = self.session.post(url, data=data, timeout=15, verify=False)
+            r = self.session.post(url, data=payload, timeout=15, verify=False)
+            if r.status_code == 200:
+                # Gelen veri JSON içinde HTML barındırır
+                json_data = r.json()
+                html_content = json_data.get('data', {}).get('html', '')
+                
+                # HTML içinden linkleri regex ile çıkar
+                # <a href="https://..." class="text block"...
+                items = []
+                matches = re.findall(r'href="([^"]+)" class="text block".*?<div class="text-white text-sm">([^<]+)</div>', html_content, re.DOTALL)
+                
+                for href, title in matches:
+                    items.append({
+                        "title": title.strip(),
+                        "url": href if href.startswith("http") else f"{self.domain}{href}"
+                    })
+                return items
+        except Exception as e:
+            # print(f"Kategori çekme hatası: {e}")
+            pass
+        return []
+
+    def extract_stream_link(self, url):
+        """Video sayfasındaki şifreli veriyi çözer."""
+        try:
+            r = self.session.get(url, timeout=10, verify=False)
             if r.status_code != 200: return None
             
-            text = r.text
+            # Şifreli veriyi bul: div[data-rm-k]
+            match = re.search(r'data-rm-k=["\'](.*?)["\']', r.text)
+            if not match:
+                # Bazen JSON doğrudan script içinde olabilir
+                match = re.search(r'data-rm-k>([^<]+)<', r.text)
             
-            # Şifreli Yanıt (Data:Key formatı)
-            if ":" in text:
-                parts = text.split(':')
-                if len(parts) < 1: return None
+            if match:
+                encrypted_json_str = match.group(1)
+                data = json.loads(encrypted_json_str)
                 
-                # Katman 1
-                l1 = self.crypto.decrypt(parts[0], STATIC_AES_KEY)
-                if not l1: return None
+                ciphertext = data.get('ciphertext')
+                iv = data.get('iv')
+                salt = data.get('salt')
                 
-                # Katman 2 (Genellikle ':' ile ayrılır)
-                l1_parts = l1.split(':')
-                final_str = self.crypto.decrypt(l1_parts[0], STATIC_AES_KEY) if len(l1_parts) > 0 else l1
-                
-                if final_str:
-                    # Bazen JSON string bozuk olabilir, temizle
-                    final_str = final_str.strip()
-                    # Eğer liste değilse ve başında { yoksa hata olabilir
-                    if final_str.startswith("{") or final_str.startswith("["):
-                        return json.loads(final_str)
-                        
-            # Şifresiz Yanıt
-            elif text.startswith("{") or text.startswith("["):
-                return json.loads(text)
-                
-        except Exception:
-            pass
-        return None
-
-    def process_item(self, item, category):
-        """İçeriği M3U formatına çevirir"""
-        try:
-            name = item.get('chName', item.get('diziName', 'Bilinmeyen'))
-            img = item.get('chImg', item.get('diziImg', ''))
-            url = item.get('chUrl', item.get('diziUrl', ''))
-            ctype = item.get('chType', item.get('diziType', ''))
-            
-            stream_url = ""
-
-            # Canlı TV veya Web Linki (Direkt alınır)
-            if ctype in ['live_url', 'web', 'link', 'tekli_regex_lb_sh_3']:
-                stream_url = url
-            
-            # Film/Dizi (Detay isteği gerekir - Deep Crawl)
-            elif ctype in ['dizi', 'film'] or (url and url.endswith('.php')):
-                try:
-                    details = self.api_post(url)
-                    if details:
-                        if isinstance(details, list) and details:
-                            stream_url = details[0].get('diziUrl', details[0].get('chUrl', ''))
-                        elif isinstance(details, dict):
-                            stream_url = details.get('diziUrl', details.get('chUrl', ''))
-                except: pass
-
-            # Link Kontrolü
-            if stream_url and stream_url.startswith("http"):
-                # Otomatik oynatılamayan kaynakları (Yandex, VK vb.) ele
-                if any(bad in stream_url for bad in ["yandex", "vk.com", "drive.google", "cloud.mail.ru"]):
-                    return None
-                
-                # URL encoding (boşluk varsa)
-                stream_url = stream_url.replace(" ", "%20")
-
-                # M3U Entry
-                m3u = f'#EXTINF:-1 tvg-logo="{img}" group-title="{category}",{name}\n'
-                m3u += f'#EXTVLCOPT:http-user-agent={HEADERS["User-Agent"]}\n'
-                m3u += f'#EXTVLCOPT:http-referrer={HEADERS["Referer"]}\n'
-                m3u += f"{stream_url}\n"
-                return m3u
-
+                if ciphertext and iv and salt:
+                    decrypted_url = self.crypto.decrypt(salt, iv, ciphertext)
+                    if decrypted_url:
+                        # Decrypted URL genellikle bir iframe linkidir (player)
+                        # Direkt bu linki veya içindeki m3u8'i alabiliriz.
+                        # M3U için iframe URL'si genelde yeterlidir (oynatıcı destekliyorsa)
+                        # Ama biz bir adım ileri gidip içindeki mp4/m3u8'i regex ile arayalım.
+                        return self.resolve_player_link(decrypted_url)
         except:
             pass
         return None
 
+    def resolve_player_link(self, player_url):
+        """Iframe içindeki gerçek videoyu bulmaya çalışır."""
+        try:
+            # URL domain kontrolü
+            if not player_url.startswith("http"):
+                player_url = f"{self.domain}{player_url}"
+
+            r = self.session.get(player_url, headers={"Referer": self.domain}, timeout=10, verify=False)
+            
+            # M3U8 veya MP4 ara
+            # Genelde: file: "https://....m3u8"
+            video_match = re.search(r'file:\s*["\']([^"\']+\.(?:m3u8|mp4))["\']', r.text)
+            if video_match:
+                return video_match.group(1)
+            
+            # Eğer bulamazsa player URL'sini döndür (Bazı IPTV playerlar webview ile açabilir)
+            return player_url
+        except:
+            return player_url
+
+def process_item(scraper, item, category_name):
+    final_link = scraper.extract_stream_link(item['url'])
+    if final_link:
+        # M3U Entry
+        return (
+            f'#EXTINF:-1 group-title="{category_name}",{item["title"]}\n'
+            f'#EXTVLCOPT:http-user-agent={USER_AGENT}\n'
+            f'#EXTVLCOPT:http-referrer={scraper.domain}/\n'
+            f'{final_link}\n'
+        )
+    return None
+
 def main():
-    crawler = InatCrawler()
+    print("--- DiziPal M3U Oluşturucu ---")
+    scraper = DiziPalScraper()
     
-    if not crawler.base_url:
-        print("[FATAL] Hiçbir sunucu bulunamadı. IP bloğu veya sunucu hatası.")
+    if not scraper.init_session():
+        print("[FATAL] Siteye giriş yapılamadı (Cloudflare veya bakım).")
         sys.exit(1)
-        
-    print(f"[-] Kategoriler çekiliyor ({crawler.base_url})...")
-    cats = crawler.api_post("")
-    
-    if not cats:
-        print("[FATAL] Kategori listesi boş. Şifre çözme hatası olabilir.")
-        sys.exit(1)
-        
-    print(f"[-] {len(cats)} kategori bulundu. İçerikler taranıyor...")
-    
+
     playlist_entries = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
-        for cat in cats:
-            c_name = cat.get('catName', 'Genel')
-            c_url = cat.get('catUrl', '')
-            
-            if not c_url or any(x in c_name for x in ["Hata", "Destek", "Telegram", "Duyuru"]):
-                continue
-            
-            print(f"   > Taranıyor: {c_name}")
-            items = crawler.api_post(c_url)
-            
-            if items and isinstance(items, list):
-                for item in items:
-                    futures.append(executor.submit(crawler.process_item, item, c_name))
         
-        print(f"[-] {len(futures)} içerik işleniyor. Lütfen bekleyin...")
+        for cat in CATEGORIES:
+            print(f"[-] Kategori taranıyor: {cat['name']}")
+            items = scraper.fetch_category_items(cat['id'])
+            print(f"    Bulunan içerik: {len(items)}")
+            
+            for item in items:
+                futures.append(executor.submit(process_item, scraper, item, cat['name']))
         
-        count = 0
-        for f in concurrent.futures.as_completed(futures):
+        print("[-] Linkler çözülüyor (Bu işlem biraz sürebilir)...")
+        for i, f in enumerate(concurrent.futures.as_completed(futures)):
             res = f.result()
             if res: playlist_entries.append(res)
-            count += 1
-            if count % 50 == 0: print(f"    İşlenen: {count}/{len(futures)}")
+            if i % 20 == 0: print(f"    İşlenen: {i}")
 
     if playlist_entries:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
             for entry in playlist_entries:
                 f.write(entry)
-        print(f"\n[BAŞARILI] Liste oluşturuldu: {OUTPUT_FILE} ({len(playlist_entries)} içerik)")
+        print(f"[BAŞARILI] {len(playlist_entries)} içerik {OUTPUT_FILE} dosyasına kaydedildi.")
     else:
-        print("\n[UYARI] Hiçbir içerik bulunamadı.")
+        print("[UYARI] Hiçbir link bulunamadı.")
 
 if __name__ == "__main__":
     main()
