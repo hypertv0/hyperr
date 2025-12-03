@@ -5,8 +5,8 @@ import random
 import time
 
 # --- AYARLAR ---
-MAX_PAGES = 50  # Her kategori için maksimum kaç sayfa taranacak? (Sınırı artırabilirsin)
-TIMEOUT = 10    # İstek zaman aşımı (saniye)
+MAX_PAGES = 200  # Her kategori için taranacak sayfa sayısı (Binlerce içerik için yüksek tutuldu)
+TIMEOUT = 15     # Zaman aşımı
 
 # --- SABİTLER ---
 FB_API_KEY = "AIzaSyBbhpzG8Ecohu9yArfCO5tF13BQLhjLahc"
@@ -15,7 +15,6 @@ FB_PROJECT_ID = "791583031279"
 PACKAGE_NAME = "com.rectv.shot"
 SW_KEY = "4F5A9C3D9A86FA54EACEDDD635185/c3c5bd17-e37b-4b94-a944-8a3688a30452"
 
-# Worker Bypass Domainleri
 BYPASS_DOMAINS = [
     "https://uzaycorbasi.lol/",
     "https://nextpulse.sbs/",
@@ -23,18 +22,17 @@ BYPASS_DOMAINS = [
     "https://firinmakinesi.lol/"
 ]
 
-# URL yapılarında {page} yer tutucusu kullanıyoruz
 CATEGORIES = [
-    {"title": "Canlı TV", "url": "/api/channel/by/filtres/0/0/{page}/"},
-    {"title": "Son Filmler", "url": "/api/movie/by/filtres/0/created/{page}/"},
-    {"title": "Türkçe Dublaj", "url": "/api/movie/by/filtres/26/created/{page}/"},
-    {"title": "Türkçe Altyazı", "url": "/api/movie/by/filtres/27/created/{page}/"},
-    {"title": "Son Diziler", "url": "/api/serie/by/filtres/0/created/{page}/"},
-    {"title": "Aksiyon", "url": "/api/movie/by/filtres/1/created/{page}/"},
-    {"title": "Komedi", "url": "/api/movie/by/filtres/3/created/{page}/"},
-    {"title": "Korku", "url": "/api/movie/by/filtres/8/created/{page}/"},
-    {"title": "Aile", "url": "/api/movie/by/filtres/14/created/{page}/"},
-    {"title": "Bilim Kurgu", "url": "/api/movie/by/filtres/4/created/{page}/"}
+    {"title": "Canlı TV", "url": "/api/channel/by/filtres/0/0/{page}/", "type": "live"},
+    {"title": "Son Filmler", "url": "/api/movie/by/filtres/0/created/{page}/", "type": "movie"},
+    {"title": "Son Diziler", "url": "/api/serie/by/filtres/0/created/{page}/", "type": "serie"},
+    {"title": "Türkçe Dublaj", "url": "/api/movie/by/filtres/26/created/{page}/", "type": "movie"},
+    {"title": "Türkçe Altyazı", "url": "/api/movie/by/filtres/27/created/{page}/", "type": "movie"},
+    {"title": "Aksiyon", "url": "/api/movie/by/filtres/1/created/{page}/", "type": "movie"},
+    {"title": "Komedi", "url": "/api/movie/by/filtres/3/created/{page}/", "type": "movie"},
+    {"title": "Korku", "url": "/api/movie/by/filtres/8/created/{page}/", "type": "movie"},
+    {"title": "Bilim Kurgu", "url": "/api/movie/by/filtres/4/created/{page}/", "type": "movie"},
+    {"title": "Animasyon", "url": "/api/movie/by/filtres/13/created/{page}/", "type": "movie"}
 ]
 
 class RecTV:
@@ -49,18 +47,10 @@ class RecTV:
         })
         self.base_url = None
         self.token = None
-        self.seen_ids = set() # Aynı içerikleri tekrar eklememek için
+        self.seen_ids = set()
 
     def get_firebase_domain(self):
         print("🌍 Güncel adres aranıyor...")
-        # Firebase başarısız olursa diye manuel liste
-        manual_fallbacks = [
-            "https://m.prectv60.lol",
-            "https://m.prectv61.lol",
-            "http://m.rectv.xyz"
-        ]
-        
-        # Önce Firebase
         try:
             url = f"https://firebaseremoteconfig.googleapis.com/v1/projects/{FB_PROJECT_ID}/namespaces/firebase:fetch"
             body = {"appId": FB_APP_ID, "appInstanceId": "valid_id", "appVersion": "19.2.2"}
@@ -71,52 +61,65 @@ class RecTV:
                     self.base_url = api_url.replace("/api/", "").rstrip("/")
                     print(f"✅ Firebase Domain: {self.base_url}")
                     return
-        except:
-            pass
-
-        # Firebase olmazsa manuel dene
-        print("⚠️ Firebase yanıt vermedi, manuel domainler deneniyor...")
-        for domain in manual_fallbacks:
-            try:
-                r = self.session.get(f"{domain}/api/attest/nonce", timeout=3)
-                if r.status_code == 200:
-                    self.base_url = domain
-                    print(f"✅ Çalışan Domain: {domain}")
-                    return
-            except:
-                continue
-        
-        # Hiçbiri çalışmazsa varsayılan
+        except: pass
         self.base_url = "https://m.prectv60.lol"
+        print(f"⚠️ Varsayılan Domain: {self.base_url}")
 
     def login(self):
         if not self.base_url: self.get_firebase_domain()
-        
         try:
             r = self.session.get(f"{self.base_url}/api/attest/nonce", timeout=TIMEOUT)
             data = r.json()
-            # Token veya Nonce hangisi varsa al
             token = data.get("token") or data.get("nonce")
-            
-            if not token:
-                print("❌ Token alınamadı.")
-                return False
-
+            if not token: return False
             self.session.headers.update({"Authorization": f"Bearer {token}"})
-            # Verify formalite, 400 dönse de devam ediyoruz
             self.session.post(f"{self.base_url}/api/attest/verify", json={}, timeout=TIMEOUT)
             self.token = token
             print("✅ Token alındı.")
             return True
-        except Exception as e:
-            print(f"❌ Login Hatası: {e}")
-            return False
+        except: return False
 
     def process_link(self, raw_link):
         if not raw_link or "otolinkaff" in raw_link: return None
         if "1.cf32-2c8.workers.dev" in raw_link:
             return f"{random.choice(BYPASS_DOMAINS)}{raw_link.split('.dev/')[-1]}"
         return raw_link
+
+    # --- YENİ: DİZİ BÖLÜMLERİNİ ÇEKEN FONKSİYON ---
+    def fetch_series_episodes(self, series_id, series_title, cat_title, series_image):
+        """Dizinin sezon ve bölümlerini çeker"""
+        url = f"{self.base_url}/api/season/by/serie/{series_id}/{SW_KEY}"
+        m3u_entries = ""
+        count = 0
+        
+        try:
+            r = self.session.get(url, timeout=TIMEOUT)
+            if r.status_code == 200:
+                seasons = r.json()
+                if isinstance(seasons, list):
+                    for season in seasons:
+                        episodes = season.get("episodes", [])
+                        for ep in episodes:
+                            ep_title = ep.get("title", f"Bölüm {ep.get('id')}")
+                            full_title = f"{series_title} - {ep_title}"
+                            sources = ep.get("sources", [])
+                            
+                            if sources:
+                                raw_url = sources[0].get("url")
+                                final_url = self.process_link(raw_url)
+                                
+                                if final_url:
+                                    # Dizi ID + Bölüm ID kombinasyonu ile duplicate kontrolü
+                                    unique_ep_id = f"S{series_id}E{ep.get('id')}"
+                                    if unique_ep_id not in self.seen_ids:
+                                        m3u_entries += f'#EXTINF:-1 group-title="{cat_title}" tvg-logo="{series_image}" http-referrer="https://twitter.com/",{full_title}\n'
+                                        m3u_entries += f"{final_url}\n"
+                                        self.seen_ids.add(unique_ep_id)
+                                        count += 1
+        except Exception as e:
+            print(f"   ⚠️ Dizi Hatası ({series_title}): {e}")
+            
+        return m3u_entries, count
 
     def get_content(self):
         if not self.login(): return "#EXTM3U\n"
@@ -125,60 +128,63 @@ class RecTV:
         total_count = 0
 
         for cat in CATEGORIES:
-            print(f"\n📂 Kategori Başlıyor: {cat['title']}")
+            print(f"\n📂 Kategori: {cat['title']} ({cat['type']})")
             
             for page in range(1, MAX_PAGES + 1):
-                # {page} kısmını gerçek sayfa numarasıyla değiştir
                 url = f"{self.base_url}{cat['url'].format(page=page)}{SW_KEY}"
                 
                 try:
-                    # Sunucuyu yormamak için minik bekleme
-                    time.sleep(0.2)
-                    
                     r = self.session.get(url, timeout=TIMEOUT)
-                    if r.status_code != 200:
-                        print(f"   -> Sayfa {page} bitti veya hata (Kod: {r.status_code})")
-                        break
-                    
+                    # Eğer 200 değilse veya boş ise kategori bitmiştir
+                    if r.status_code != 200: break
                     data = r.json()
                     if not data or not isinstance(data, list) or len(data) == 0:
                         print(f"   -> Sayfa {page} boş, kategori tamamlandı.")
                         break
 
                     page_added = 0
+                    
                     for item in data:
-                        # ID kontrolü (Sonsuz döngü veya tekrarı önlemek için)
                         item_id = item.get("id")
-                        if item_id in self.seen_ids:
-                            continue
-                        
-                        self.seen_ids.add(item_id)
-                        
                         title = item.get("title", "Bilinmeyen").strip().replace(",", " ")
                         image = item.get("image", "")
-                        sources = item.get("sources", [])
                         
-                        if sources:
-                            raw_url = sources[0].get("url")
-                            final_url = self.process_link(raw_url)
+                        # --- TİP KONTROLÜ ---
+                        # Eğer bu bir Dizi ise (Serie)
+                        if cat['type'] == "serie" or item.get("type") == "serie":
+                            # Diziyi duplicate kontrolüne sokma, bölümleri kontrol ediyoruz
+                            entries, s_count = self.fetch_series_episodes(item_id, title, cat['title'], image)
+                            m3u_content += entries
+                            page_added += s_count
+                            total_count += s_count
                             
-                            if final_url:
-                                m3u_content += f'#EXTINF:-1 group-title="{cat["title"]}" tvg-logo="{image}" http-referrer="https://twitter.com/",{title}\n'
-                                m3u_content += f"{final_url}\n"
-                                page_added += 1
-                                total_count += 1
+                        # Eğer Film veya Canlı TV ise
+                        else:
+                            if item_id in self.seen_ids: continue
+                            self.seen_ids.add(item_id)
+                            
+                            sources = item.get("sources", [])
+                            if sources:
+                                raw_url = sources[0].get("url")
+                                final_url = self.process_link(raw_url)
+                                if final_url:
+                                    m3u_content += f'#EXTINF:-1 group-title="{cat["title"]}" tvg-logo="{image}" http-referrer="https://twitter.com/",{title}\n'
+                                    m3u_content += f"{final_url}\n"
+                                    page_added += 1
+                                    total_count += 1
                     
-                    print(f"   -> Sayfa {page}: {page_added} içerik eklendi.")
+                    print(f"   -> Sayfa {page}: {page_added} içerik tarandı.")
                     
-                    # Eğer bu sayfada hiç yeni içerik yoksa diğer sayfalara bakmaya gerek yok
-                    if page_added == 0:
-                        break
-
+                    # ÖNEMLİ DÜZELTME:
+                    # page_added == 0 olsa bile BREAK YAPMIYORUZ.
+                    # Çünkü belki bu sayfadaki tüm filmler "Son Filmler"den dolayı zaten eklenmiştir
+                    # ama bir sonraki sayfada yeni filmler olabilir.
+                    
                 except Exception as e:
                     print(f"   -> Sayfa Hatası: {e}")
                     break
 
-        print(f"\n🎉 TOPLAM {total_count} İÇERİK M3U DOSYASINA YAZILDI.")
+        print(f"\n🎉 TOPLAM {total_count} İÇERİK.")
         return m3u_content
 
 if __name__ == "__main__":
