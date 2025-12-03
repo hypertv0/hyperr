@@ -1,3 +1,5 @@
-DrissionPage
-pycryptodome
+undetected-chromedriver
+selenium
 requests
+pycryptodome
+beautifulsoup4
