@@ -1,5 +1,6 @@
-from DrissionPage import ChromiumPage, ChromiumOptions
-from curl_cffi import requests as crequests
+from seleniumbase import SB
+from curl_cffi import requests
+from bs4 import BeautifulSoup
 import json
 import re
 import base64
@@ -11,35 +12,24 @@ from Crypto.Hash import SHA512
 import sys
 import time
 import random
+import xml.etree.ElementTree as ET
 
 # --- AYARLAR ---
 PASSPHRASE = "3hPn4uCjTVtfYWcjIcoJQ4cL1WWk1qxXI39egLYOmNv6IblA7eKJz68uU3eLzux1biZLCms0quEjTYniGv5z1JcKbNIsDQFSeIZOBZJz4is6pD7UyWDggWWzTLBQbHcQFpBQdClnuQaMNUHtLHTpzCvZy33p6I7wFBvL4fnXBYH84aUIyWGTRvM2G5cfoNf4705tO2kv"
 DOMAIN_LIST_URL = "https://raw.githubusercontent.com/Kraptor123/domainListesi/refs/heads/main/eklenti_domainleri.txt"
-DEFAULT_DOMAIN = "https://dizipal1515.com" # Yedek
+DEFAULT_DOMAIN = "https://dizipal1515.com"
 OUTPUT_FILE = "playlist.m3u"
-MAX_WORKERS = 20 # Hız için yüksek thread sayısı
+MAX_WORKERS = 30 # Sitemap çok link içerdiği için worker sayısını artırdık
 
-# Eklentideki kategori ID'leri
-CATEGORIES = [
-    {"id": "0", "name": "Yeni Eklenenler"},
-    {"id": "1", "name": "Exxen"},
-    {"id": "6", "name": "Disney+"},
-    {"id": "10", "name": "Netflix"},
-    {"id": "53", "name": "Amazon"},
-    {"id": "54", "name": "Apple+"},
-    {"id": "66", "name": "BluTV"},
-    {"id": "181", "name": "TOD"},
-    {"id": "242", "name": "Tabii"}
-]
+# Taklit Edilecek Tarayıcı İmzası
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 class CryptoUtils:
-    """AES Şifre Çözücü (Smali kodunun Python karşılığı)"""
     def decrypt(self, salt_hex, iv_hex, ciphertext_b64):
         try:
             salt = bytes.fromhex(salt_hex)
             iv = bytes.fromhex(iv_hex)
             ciphertext = base64.b64decode(ciphertext_b64)
-            # Java'daki PBKDF2WithHmacSHA512 algoritması
             key = PBKDF2(PASSPHRASE, salt, dkLen=32, count=1000, hmac_hash_module=SHA512)
             cipher = AES.new(key, AES.MODE_CBC, iv)
             decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
@@ -47,137 +37,133 @@ class CryptoUtils:
         except:
             return None
 
-class AuthManager:
-    """Cloudflare'i geçip cKey/cValue/Cookie çalan sınıf"""
+class DiziSiteManager:
     def __init__(self):
-        self.domain = self.find_domain()
-        self.cookies = None
-        self.ua = None
-        self.cKey = None
-        self.cValue = None
+        self.domain = self._get_domain()
+        self.cookies = {}
+        self.crypto = CryptoUtils()
+        # Hızlı istekler için curl_cffi oturumu
+        self.session = requests.Session(impersonate="chrome120")
 
-    def find_domain(self):
-        print("[-] Domain aranıyor...")
+    def _get_domain(self):
         try:
-            # Requests kütüphanesi ile Github'dan domaini al
-            import requests
             r = requests.get(DOMAIN_LIST_URL, timeout=5)
             if r.status_code == 200:
                 parts = r.text.split('|')
                 for part in parts:
                     if "DiziPalOrijinal" in part:
-                        d = part.split(':', 1)[1].strip().rstrip('/')
-                        print(f"[OK] Domain: {d}")
-                        return d
+                        return part.split(':', 1)[1].strip().rstrip('/')
         except: pass
         return DEFAULT_DOMAIN
 
-    def get_auth_data(self):
-        print("[-] Tarayıcı (DrissionPage) başlatılıyor...")
+    def get_cookies_with_browser(self):
+        """Sadece Cloudflare'i geçip Cookie almak için tarayıcı açar"""
+        print("[-] Tarayıcı ile Cloudflare bypass ediliyor...")
         
-        # Linux sunucu için ayarlar
-        co = ChromiumOptions()
-        co.set_argument('--no-sandbox')
-        co.set_argument('--disable-gpu')
-        # Linux'ta olduğumuz için mecburen headless, ama DrissionPage bunu gizler
-        co.set_argument('--headless=new') 
-        # Eklentinin User-Agent'ını taklit et
-        co.set_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0")
-        
-        page = ChromiumPage(co)
-        
-        try:
-            print(f"[-] {self.domain} adresine gidiliyor...")
-            page.get(self.domain)
-            
-            # Cloudflare Turnstile kontrolü (Otomatik geçer)
-            if page.ele('@id=challenge-stage', timeout=2):
-                 print("[-] Cloudflare Challenge algılandı, bekleniyor...")
-            
-            # Sayfanın yüklenmesini ve cKey inputunun gelmesini bekle (Max 40sn)
-            # Eklenti: input name="cKey"
-            ele = page.wait.ele('css:input[name="cKey"]', timeout=40)
-            
-            if ele:
-                print("[OK] Site açıldı! Veriler çalınıyor...")
-                self.cKey = page.ele('css:input[name="cKey"]').attr('value')
-                self.cValue = page.ele('css:input[name="cValue"]').attr('value')
-                self.ua = page.user_agent
+        with SB(uc=True, headless=False) as sb:
+            try:
+                sb.open(self.domain)
                 
-                # Cookie'leri al
-                cookies_list = page.cookies.as_dict()
-                # Requests formatına çevir string olarak
-                self.cookies = cookies_list
+                # Cloudflare kontrolü
+                if "Just a moment" in sb.get_title():
+                    print("[-] Cloudflare Challenge çözülüyor...")
+                    sb.uc_gui_click_captcha()
+                    time.sleep(6)
                 
-                print(f"[OK] Kimlik doğrulama başarılı. Token: {self.cKey[:5]}...")
+                # Sitenin yüklendiğinden emin ol (body tagini bekle)
+                sb.wait_for_element("body", timeout=30)
+                
+                # Çerezleri al
+                cookies = sb.get_cookies()
+                for cookie in cookies:
+                    self.cookies[cookie['name']] = cookie['value']
+                
+                # Session'a çerezleri yükle
+                self.session.cookies.update(self.cookies)
+                self.session.headers.update({
+                    "User-Agent": sb.get_user_agent(),
+                    "Referer": self.domain
+                })
+                
+                print("[OK] Çerezler alındı. Hızlı moda geçiliyor.")
                 return True
-            else:
-                print("[FATAL] Site açıldı ama tokenlar bulunamadı.")
-                print(f"Title: {page.title}")
+            except Exception as e:
+                print(f"[FATAL] Tarayıcı hatası: {e}")
                 return False
-                
-        except Exception as e:
-            print(f"[FATAL] Tarayıcı hatası: {e}")
-            return False
-        finally:
-            page.quit()
 
-class FastCrawler:
-    """Çalınan verilerle API'ye saldıran sınıf"""
-    def __init__(self, auth_data):
-        self.domain = auth_data.domain
-        self.cKey = auth_data.cKey
-        self.cValue = auth_data.cValue
-        self.crypto = CryptoUtils()
+    def fetch_sitemap_links(self):
+        """Sitemap.xml üzerinden tüm video linklerini toplar"""
+        print("[-] Sitemap analiz ediliyor...")
+        all_links = []
         
-        # curl_cffi session (TLS parmak izi taklidi yapar)
-        self.session = crequests.Session(impersonate="chrome110")
-        self.session.cookies.update(auth_data.cookies)
-        self.session.headers.update({
-            "User-Agent": auth_data.ua,
-            "Referer": f"{self.domain}/",
-            "Origin": self.domain,
-            "X-Requested-With": "XMLHttpRequest",
-            "Accept": "*/*"
-        })
-
-    def get_category_items(self, cat_id):
-        """API'den kategori içeriğini çeker (HIZLI)"""
-        url = f"{self.domain}/bg/getserielistbychannel"
-        data = {
-            "cKey": self.cKey,
-            "cValue": self.cValue,
-            "curPage": "1",
-            "channelId": cat_id,
-            "languageId": "2,3,4"
-        }
-        
+        # Ana sitemap'i dene
+        sitemap_url = f"{self.domain}/sitemap.xml"
         try:
-            # Cloudflare bypasslı request
-            r = self.session.post(url, data=data, timeout=15)
-            if r.status_code == 200:
-                try:
-                    # Yanıt JSON içindeki HTML
-                    js = r.json()
-                    html = js.get('data', {}).get('html', '')
-                    
-                    # Regex ile linkleri sök
-                    items = []
-                    matches = re.findall(r'href="([^"]+)".*?text-white text-sm">([^<]+)', html, re.DOTALL)
-                    for link, title in matches:
-                        full_link = link if link.startswith("http") else f"{self.domain}{link}"
-                        items.append({"title": title.strip(), "url": full_link})
-                    return items
-                except: pass
-        except Exception as e:
-            print(f"    Kategori hatası: {e}")
-        return []
+            r = self.session.get(sitemap_url, timeout=20)
+            if r.status_code != 200:
+                print("[!] Sitemap bulunamadı.")
+                return []
+            
+            # XML Root
+            root = ET.fromstring(r.content)
+            
+            # Sitemap Index mi yoksa URL listesi mi?
+            # Genellikle sitemap_index.xml alt sitemapleri listeler
+            sub_sitemaps = []
+            
+            # Namespace temizliği (bazen {http://...}loc gibi gelir)
+            for child in root:
+                url = ""
+                for elem in child:
+                    if "loc" in elem.tag:
+                        url = elem.text
+                        break
+                
+                if not url: continue
 
-    def resolve_video(self, url):
-        """Video sayfasındaki şifreyi çözer (Deep Crawl)"""
+                # Alt sitemapleri bul
+                if "sitemap" in url and url.endswith(".xml"):
+                    sub_sitemaps.append(url)
+                # Doğrudan linkleri bul (sadece dizi ve filmler)
+                elif any(x in url for x in ["/dizi/", "/film/", "/bolum/"]):
+                    all_links.append(url)
+            
+            # Alt sitemapleri tara
+            for sub_url in sub_sitemaps:
+                print(f"    > Alt harita taranıyor: {sub_url.split('/')[-1]}")
+                try:
+                    r_sub = self.session.get(sub_url, timeout=15)
+                    sub_root = ET.fromstring(r_sub.content)
+                    for child in sub_root:
+                        for elem in child:
+                            if "loc" in elem.tag:
+                                url = elem.text
+                                # Gereksiz sayfaları ele (etiketler, oyuncular vb.)
+                                if any(x in url for x in ["/dizi/", "/film/"]) and not any(y in url for y in ["/oyuncu/", "/etiket/", "/kategori/"]):
+                                    all_links.append(url)
+                except:
+                    continue
+
+            # Benzersiz yap ve sırala
+            all_links = list(set(all_links))
+            print(f"[OK] Toplam {len(all_links)} içerik linki bulundu.")
+            return all_links
+
+        except Exception as e:
+            print(f"[HATA] Sitemap okuma hatası: {e}")
+            return []
+
+    def extract_stream_from_html(self, url):
+        """Verilen URL'ye gider ve videoyu çözer"""
         try:
             r = self.session.get(url, timeout=10)
-            # Şifreli JSON'u bul
+            if r.status_code != 200: return None
+            
+            # Sayfa başlığını al (Kategori ve İsim için)
+            soup = BeautifulSoup(r.content, 'lxml')
+            page_title = soup.title.string.replace("İzle", "").replace("DiziPal", "").strip() if soup.title else "Bilinmeyen"
+            
+            # Şifreli veriyi bul
             match = re.search(r'data-rm-k=["\'](.*?)["\']', r.text)
             if match:
                 json_str = match.group(1).replace('&quot;', '"')
@@ -185,83 +171,75 @@ class FastCrawler:
                 
                 decrypted = self.crypto.decrypt(data['salt'], data['iv'], data['ciphertext'])
                 if decrypted:
-                    # İframe linkini al
-                    ifr_match = re.search(r'src="([^"]+)"', decrypted)
-                    if ifr_match:
-                        ifr_url = ifr_match.group(1)
-                        if not ifr_url.startswith("http"): ifr_url = self.domain + ifr_url
+                    # İframe src bul
+                    src_match = re.search(r'src="([^"]+)"', decrypted)
+                    if src_match:
+                        iframe_url = src_match.group(1)
+                        if not iframe_url.startswith("http"): iframe_url = self.domain + iframe_url
                         
-                        # İframe'e git
-                        r2 = self.session.get(ifr_url, headers={"Referer": self.domain}, timeout=10)
+                        # İframe içine gir
+                        r_ifr = self.session.get(iframe_url, headers={"Referer": self.domain}, timeout=10)
                         
-                        # .m3u8 veya .mp4 bul
-                        vid_match = re.search(r'file:\s*["\']([^"\']+\.(?:m3u8|mp4)[^"\']*)["\']', r2.text)
-                        if vid_match: return vid_match.group(1)
-                        
-                        # Alternatif kaynak
-                        src_match = re.search(r'source:\s*["\']([^"\']+)["\']', r2.text)
-                        if src_match: return src_match.group(1)
+                        # Video dosyasını bul (.m3u8)
+                        vid_match = re.search(r'file:\s*["\']([^"\']+\.m3u8[^"\']*)["\']', r_ifr.text)
+                        if vid_match:
+                            final_url = vid_match.group(1)
+                            
+                            # Kategori Tahmini (URL'den)
+                            category = "Filmler" if "/film/" in url else "Diziler"
+                            
+                            return (
+                                f'#EXTINF:-1 group-title="{category}",{page_title}\n'
+                                f'#EXTVLCOPT:http-user-agent={self.session.headers["User-Agent"]}\n'
+                                f'#EXTVLCOPT:http-referrer={self.domain}/\n'
+                                f'{final_url}\n'
+                            )
         except:
             pass
         return None
 
-def worker(crawler, item, category):
-    try:
-        # Rastgele bekleme yok, olabildiğince hızlı
-        link = crawler.resolve_video(item['url'])
-        if link and link.startswith("http"):
-            return (
-                f'#EXTINF:-1 group-title="{category}",{item["title"]}\n'
-                f'#EXTVLCOPT:http-user-agent={crawler.session.headers["User-Agent"]}\n'
-                f'#EXTVLCOPT:http-referrer={crawler.domain}/\n'
-                f'{link}\n'
-            )
-    except:
-        pass
-    return None
-
 def main():
-    print("--- DiziPal Ultimate Sync ---")
+    print("--- DiziPal Sitemap Sync ---")
+    manager = DiziSiteManager()
     
-    # AŞAMA 1: GÜVENLİ GİRİŞ (Browser)
-    auth = AuthManager()
-    if not auth.get_auth_data():
-        print("[FATAL] Giriş yapılamadı. Github IP'si banlanmış olabilir.")
+    # 1. Giriş Yap
+    if not manager.get_cookies_with_browser():
         sys.exit(1)
         
-    # AŞAMA 2: HIZLI TARAMA (API)
-    print("[-] Oturum bilgileri API istemcisine aktarılıyor...")
-    crawler = FastCrawler(auth)
+    # 2. Linkleri Topla (Sitemap)
+    links = manager.fetch_sitemap_links()
     
+    if not links:
+        print("[UYARI] Link bulunamadı.")
+        sys.exit(1)
+        
+    # 3. Linkleri İşle (Multithreading)
+    print(f"[-] {len(links)} içerik işleniyor (Max {MAX_WORKERS} thread)...")
     playlist = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = []
-        for cat in CATEGORIES:
-            print(f"[-] Kategori taranıyor: {cat['name']}")
-            items = crawler.get_category_items(cat['id'])
-            print(f"    {len(items)} içerik bulundu.")
-            
-            for item in items:
-                futures.append(executor.submit(worker, crawler, item, cat['name']))
+        # Linkleri karıştır ki sunucuya yük dağılsın
+        random.shuffle(links)
         
-        print(f"[-] {len(futures)} içerik için video linkleri çözülüyor...")
+        futures = [executor.submit(manager.extract_stream_from_html, link) for link in links]
+        
         completed = 0
         for f in concurrent.futures.as_completed(futures):
             res = f.result()
-            if res: playlist.append(res)
+            if res:
+                playlist.append(res)
             completed += 1
-            if completed % 20 == 0: print(f"    İlerleme: {completed}/{len(futures)}")
+            if completed % 50 == 0:
+                print(f"    İlerleme: {completed}/{len(links)}")
 
-    # KAYDET
     if playlist:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
-            for p in playlist:
-                f.write(p)
+            for entry in playlist:
+                f.write(entry)
         print(f"[BAŞARILI] {len(playlist)} içerik {OUTPUT_FILE} dosyasına yazıldı.")
     else:
-        print("[UYARI] Liste boş.")
+        print("[HATA] Hiçbir video çözülemedi.")
 
 if __name__ == "__main__":
     main()
