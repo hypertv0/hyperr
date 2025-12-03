@@ -1,6 +1,7 @@
 from curl_cffi import requests
-from bs4 import BeautifulSoup # Jsoup'un Python karşılığı
+from bs4 import BeautifulSoup
 import json
+import re
 import base64
 import concurrent.futures
 from Crypto.Cipher import AES
@@ -9,17 +10,21 @@ from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Hash import SHA512
 import sys
 import time
+import random
 
-# --- AYARLAR ---
+# --- AYARLAR (SMALI KODUNDAN BİREBİR) ---
 PASSPHRASE = "3hPn4uCjTVtfYWcjIcoJQ4cL1WWk1qxXI39egLYOmNv6IblA7eKJz68uU3eLzux1biZLCms0quEjTYniGv5z1JcKbNIsDQFSeIZOBZJz4is6pD7UyWDggWWzTLBQbHcQFpBQdClnuQaMNUHtLHTpzCvZy33p6I7wFBvL4fnXBYH84aUIyWGTRvM2G5cfoNf4705tO2kv"
 DOMAIN_LIST_URL = "https://raw.githubusercontent.com/Kraptor123/domainListesi/refs/heads/main/eklenti_domainleri.txt"
-# Eğer Github'dan çekemezse varsayılan:
-DEFAULT_DOMAIN = "https://dizipal1515.com" 
+DEFAULT_DOMAIN = "https://dizipal1515.com"
 OUTPUT_FILE = "playlist.m3u"
-MAX_WORKERS = 15
+MAX_WORKERS = 5 # Cloudflare tetiklenmemesi için worker sayısını düşürdük
+
+# Smali kodundaki User-Agent (Satır 112)
+# Bu UA, sunucunun "Bu uygulama trafiği" diyip geçiş izni vermesini sağlar.
+APP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"
 
 CATEGORIES = [
-    {"id": "0", "name": "Yeni Eklenen Bölümler"},
+    {"id": "0", "name": "Yeni Eklenenler"},
     {"id": "1", "name": "Exxen"},
     {"id": "6", "name": "Disney+"},
     {"id": "10", "name": "Netflix"},
@@ -45,15 +50,20 @@ class CryptoUtils:
 
 class DiziScraper:
     def __init__(self):
-        # Eklenti Firefox kullanıyor ama curl_cffi'de en iyi bypass Chrome ile sağlanır.
-        # Impersonate: Gerçek bir tarayıcı gibi davranır (TLS Client Hello)
-        self.session = requests.Session(impersonate="chrome124")
+        # Cloudflare'i aşmak için "firefox110" parmak izini kullanıyoruz ancak 
+        # User-Agent'ı uygulamanınkiyle değiştiriyoruz.
+        self.session = requests.Session(impersonate="firefox110")
         self.session.headers.update({
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "User-Agent": APP_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1"
         })
         self.crypto = CryptoUtils()
         self.domain = self.find_domain()
@@ -63,7 +73,9 @@ class DiziScraper:
     def find_domain(self):
         print("[-] Domain listesi kontrol ediliyor...")
         try:
-            r = requests.get(DOMAIN_LIST_URL, timeout=10)
+            # Github isteği standart requests ile yapılabilir
+            import requests as std_requests
+            r = std_requests.get(DOMAIN_LIST_URL, timeout=10)
             if r.status_code == 200:
                 parts = r.text.split('|')
                 for part in parts:
@@ -77,39 +89,48 @@ class DiziScraper:
         return DEFAULT_DOMAIN
 
     def init_session(self):
-        """
-        Smali: DiziPalOrijinal.kt -> initSession
-        Jsoup kullanarak input[name=cKey] ve input[name=cValue] değerlerini çeker.
-        """
         print(f"[-] Siteye giriş yapılıyor: {self.domain}")
         
-        max_retries = 3
+        # İlk istekte referer olmamalı
+        if "Referer" in self.session.headers:
+            del self.session.headers["Referer"]
+
+        max_retries = 5
         for attempt in range(max_retries):
             try:
-                r = self.session.get(self.domain, timeout=20)
+                # Rastgele bekleme (Anti-bot tespiti için)
+                time.sleep(random.uniform(1, 3))
                 
-                # Sayfa içeriğini Jsoup gibi parse et
-                soup = BeautifulSoup(r.text, 'html.parser')
-                page_title = soup.title.string if soup.title else "No Title"
-
-                # Cloudflare kontrolü
-                if "Just a moment" in page_title or "Cloudflare" in r.text:
-                    print(f"[UYARI] Cloudflare engeli ({attempt+1}/{max_retries}). Bekleniyor...")
-                    time.sleep(3)
+                r = self.session.get(self.domain, timeout=30)
+                
+                # Cloudflare Kontrolü
+                if r.status_code == 403 or r.status_code == 503 or "Just a moment" in r.text:
+                    print(f"[UYARI] Cloudflare engeli ({attempt+1}/{max_retries}). Tekrar deneniyor...")
                     continue
 
-                # Inputları bul
+                soup = BeautifulSoup(r.text, 'html.parser')
+                
+                # Tokenları Bul
                 input_ckey = soup.find("input", {"name": "cKey"})
                 input_cvalue = soup.find("input", {"name": "cValue"})
 
                 if input_ckey and input_cvalue:
                     self.cKey = input_ckey.get("value")
                     self.cValue = input_cvalue.get("value")
-                    print(f"[OK] Tokenlar başarıyla alındı (Jsoup Mantığı).")
+                    print(f"[OK] Giriş başarılı. Tokenlar alındı.")
+                    
+                    # Sonraki istekler için Referer ve Origin ayarla (Smali ile aynı)
+                    self.session.headers.update({
+                        "Referer": f"{self.domain}/",
+                        "Origin": self.domain,
+                        "X-Requested-With": "XMLHttpRequest"
+                    })
                     return True
                 else:
-                    # Debug için sayfa başlığını yazdıralım
-                    print(f"[HATA] Token inputları bulunamadı. Sayfa Başlığı: {page_title}")
+                    # Belki site açıldı ama inputlar yok?
+                    print(f"[HATA] Site açıldı fakat tokenlar bulunamadı. Başlık: {soup.title.string if soup.title else 'Yok'}")
+                    # Debug için HTML'in küçük bir kısmını yazdır
+                    # print(r.text[:500])
             except Exception as e:
                 print(f"[HATA] Bağlantı sorunu: {e}")
             
@@ -126,51 +147,42 @@ class DiziScraper:
             "channelId": cat_id,
             "languageId": "2,3,4"
         }
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{self.domain}/",
-            "Origin": self.domain
-        }
-
+        
         try:
-            r = self.session.post(url, data=data, headers=headers, timeout=20)
+            # POST isteği
+            r = self.session.post(url, data=data, timeout=20)
             if r.status_code == 200:
                 try:
                     js = r.json()
                     html_content = js.get('data', {}).get('html', '')
-                    
-                    # Gelen HTML fragmentini parse et
                     soup = BeautifulSoup(html_content, 'html.parser')
                     items = []
                     
-                    # Smali: div.overflow-auto a
-                    # HTML yapısı: <a href="..."> ... <div class="text-white text-sm">TITLE</div> ... </a>
+                    # Linkleri topla
                     links = soup.find_all('a')
-                    
                     for link in links:
                         href = link.get('href')
-                        # Başlık genellikle linkin içindeki bir div'dedir
+                        # Başlık extraction
                         title_div = link.find('div', class_=lambda x: x and 'text-white' in x)
-                        title = title_div.text.strip() if title_div else "Bilinmeyen Dizi"
+                        title = title_div.text.strip() if title_div else link.get('title', "Bilinmeyen Dizi")
                         
                         if href:
                             full_link = href if href.startswith("http") else f"{self.domain}{href}"
                             items.append({"title": title, "url": full_link})
                     
                     return items
-                except Exception as e:
-                    print(f"[!] JSON/HTML Parse hatası: {e}")
+                except:
+                    pass
         except:
             pass
         return []
 
     def get_video_source(self, url):
         try:
+            # Detay sayfasına git
             r = self.session.get(url, timeout=15)
             soup = BeautifulSoup(r.text, 'html.parser')
             
-            # Smali: data-rm-k özniteliğini arar
-            # <div id="..." data-rm-k='{"salt":...}'></div>
             div_encrypted = soup.find('div', attrs={'data-rm-k': True})
             
             if div_encrypted:
@@ -184,12 +196,10 @@ class DiziScraper:
                 if salt and iv and ciphertext:
                     decrypted = self.crypto.decrypt(salt, iv, ciphertext)
                     if decrypted:
-                        # İframe linkini bul
-                        # Genellikle: <iframe src="https://..." ...
-                        dec_soup = BeautifulSoup(decrypted, 'html.parser')
-                        iframe = dec_soup.find('iframe')
-                        if iframe:
-                            return self.resolve_iframe(iframe.get('src'))
+                        # iframe src'sini bul
+                        match = re.search(r'src="([^"]+)"', decrypted)
+                        if match:
+                            return self.resolve_iframe(match.group(1))
         except:
             pass
         return None
@@ -199,49 +209,61 @@ class DiziScraper:
             if not iframe_url.startswith("http"):
                 iframe_url = f"{self.domain}{iframe_url}"
             
+            # İframe sayfasına git
             r = self.session.get(iframe_url, headers={"Referer": self.domain}, timeout=15)
             
-            # Regex ile dosya linkini bul (Bu kısım genelde standarttır)
-            match = re.search(r'file:\s*["\']([^"\']+\.(?:m3u8|mp4))["\']', r.text)
+            # .m3u8 linkini ara
+            match = re.search(r'file:\s*["\']([^"\']+\.m3u8[^"\']*)["\']', r.text)
             if match: return match.group(1)
             
-            match_source = re.search(r'source:\s*["\']([^"\']+)["\']', r.text)
-            if match_source: return match_source.group(1)
+            # .mp4 linkini ara
+            match = re.search(r'file:\s*["\']([^"\']+\.mp4[^"\']*)["\']', r.text)
+            if match: return match.group(1)
+
+            # 'source' değişkenini ara
+            match = re.search(r'source:\s*["\']([^"\']+)["\']', r.text)
+            if match: return match.group(1)
             
         except:
             pass
         return None
 
 def worker(scraper, item, category):
-    try:
-        link = scraper.get_video_source(item['url'])
-        if link and link.startswith("http"):
-            entry = f'#EXTINF:-1 group-title="{category}",{item["title"]}\n'
-            entry += f'#EXTVLCOPT:http-user-agent=Mozilla/5.0\n'
-            entry += f'#EXTVLCOPT:http-referrer={scraper.domain}/\n'
-            entry += f'{link}\n'
-            return entry
-    except:
-        pass
+    # Her istekte ufak gecikme (WAF bypass için)
+    time.sleep(random.uniform(0.5, 2.0))
+    
+    link = scraper.get_video_source(item['url'])
+    if link and link.startswith("http"):
+        return (
+            f'#EXTINF:-1 group-title="{category}",{item["title"]}\n'
+            f'#EXTVLCOPT:http-user-agent={APP_USER_AGENT}\n'
+            f'#EXTVLCOPT:http-referrer={scraper.domain}/\n'
+            f'{link}\n'
+        )
     return None
 
 def main():
-    print("--- DiziPal Sync V3 (BeautifulSoup Modu) Başlatıldı ---")
+    print("--- DiziPal Sync V4 (Full Stealth) ---")
     scraper = DiziScraper()
     
-    # Session başlatma (cKey/cValue alma)
     if not scraper.init_session():
-        print("[FATAL] Tokenlar alınamadığı için işlem durduruldu.")
+        print("[FATAL] Tüm denemelere rağmen siteye girilemedi.")
         sys.exit(1)
 
     playlist_data = []
     
+    # Worker sayısını düşürdük çünkü çok hızlı istek Cloudflare'i tetikler
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
         
         for cat in CATEGORIES:
             print(f"[-] Kategori taranıyor: {cat['name']}")
             items = scraper.get_category_content(cat['id'])
+            
+            if not items:
+                print("    (İçerik bulunamadı veya erişim engellendi)")
+                continue
+                
             print(f"    {len(items)} içerik bulundu.")
             
             for item in items:
@@ -255,7 +277,7 @@ def main():
             if res:
                 playlist_data.append(res)
             completed += 1
-            if completed % 10 == 0:
+            if completed % 5 == 0:
                 print(f"    İlerleme: {completed}/{len(futures)}")
 
     if playlist_data:
