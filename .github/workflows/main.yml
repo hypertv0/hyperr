@@ -1,25 +1,36 @@
-name: Core Sync
+name: Auto Playlist Sync
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *' # Her 30 dk'da bir çalışır
+  workflow_dispatch: # Manuel tetikleme
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    # Yazma izni çok önemlidir
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-      - run: pip install -r requirements.txt
-      - run: python main.py
-      - run: |
-          git config --global user.name "System"
-          git config --global user.email "sys@local"
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Crawler
+        run: python main.py
+
+      - name: Push Changes
+        run: |
+          git config --global user.name "bot"
+          git config --global user.email "bot@github.com"
           git add playlist.m3u
-          git commit -m "Log $(date)" || true
+          git commit -m "Playlist update" || echo "No changes"
           git push
