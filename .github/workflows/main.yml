@@ -1,4 +1,4 @@
-name: Auto Sync System
+name: Core Sync
 
 on:
   schedule:
@@ -6,31 +6,20 @@ on:
   workflow_dispatch:
 
 jobs:
-  run-sync:
+  sync:
     runs-on: ubuntu-latest
-    
     permissions:
       contents: write
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
-      - name: Install Libs
-        run: pip install -r requirements.txt
-
-      - name: Run Script
-        run: python main.py
-
-      - name: Commit & Push
-        run: |
-          git config --global user.name "Github Actions"
-          git config --global user.email "actions@github.com"
+      - run: pip install -r requirements.txt
+      - run: python main.py
+      - run: |
+          git config --global user.name "System"
+          git config --global user.email "sys@local"
           git add playlist.m3u
-          git commit -m "Auto-update playlist [$(date)]" || echo "No changes"
+          git commit -m "Log $(date)" || true
           git push
