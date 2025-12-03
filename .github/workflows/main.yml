@@ -1,37 +1,31 @@
-name: DiziPal Full Scan
+name: DiziPal Network Sync
 
 on:
   schedule:
-    - cron: '0 0,12 * * *' # Günde 2 kere çalışsın (Çok içerik var)
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # 6 Saat süre ver
     permissions:
       contents: write
     
     steps:
       - uses: actions/checkout@v3
 
-      - name: Install System Deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb google-chrome-stable
-
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install Requirements
+      - name: Install Libraries
         run: |
           pip install --upgrade pip
-          pip install DrissionPage curl_cffi pycryptodome beautifulsoup4 requests
+          pip install -r requirements.txt
 
       - name: Run Scraper
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py
+        run: python main.py
 
       - name: Commit & Push
         run: |
