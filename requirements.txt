@@ -1,5 +1,5 @@
-DrissionPage
+seleniumbase
 curl_cffi
 pycryptodome
 beautifulsoup4
-requests
+lxml
