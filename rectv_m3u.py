@@ -4,14 +4,18 @@ import os
 import random
 import time
 
-# --- SMALI ANALİZİ SABİTLERİ ---
+# --- AYARLAR ---
+MAX_PAGES = 50  # Her kategori için maksimum kaç sayfa taranacak? (Sınırı artırabilirsin)
+TIMEOUT = 10    # İstek zaman aşımı (saniye)
+
+# --- SABİTLER ---
 FB_API_KEY = "AIzaSyBbhpzG8Ecohu9yArfCO5tF13BQLhjLahc"
 FB_APP_ID = "1:791583031279:android:244c3d507ab299fcabc01a"
 FB_PROJECT_ID = "791583031279"
 PACKAGE_NAME = "com.rectv.shot"
 SW_KEY = "4F5A9C3D9A86FA54EACEDDD635185/c3c5bd17-e37b-4b94-a944-8a3688a30452"
 
-# Worker Bypass Domainleri (Smali loadLinks fonksiyonundan)
+# Worker Bypass Domainleri
 BYPASS_DOMAINS = [
     "https://uzaycorbasi.lol/",
     "https://nextpulse.sbs/",
@@ -19,15 +23,18 @@ BYPASS_DOMAINS = [
     "https://firinmakinesi.lol/"
 ]
 
+# URL yapılarında {page} yer tutucusu kullanıyoruz
 CATEGORIES = [
-    {"title": "Canlı TV", "url": "/api/channel/by/filtres/0/0/1/"},
-    {"title": "Son Filmler", "url": "/api/movie/by/filtres/0/created/1/"},
-    {"title": "Türkçe Dublaj", "url": "/api/movie/by/filtres/26/created/1/"},
-    {"title": "Türkçe Altyazı", "url": "/api/movie/by/filtres/27/created/1/"},
-    {"title": "Son Diziler", "url": "/api/serie/by/filtres/0/created/1/"},
-    {"title": "Aksiyon", "url": "/api/movie/by/filtres/1/created/1/"},
-    {"title": "Komedi", "url": "/api/movie/by/filtres/3/created/1/"},
-    {"title": "Korku", "url": "/api/movie/by/filtres/8/created/1/"}
+    {"title": "Canlı TV", "url": "/api/channel/by/filtres/0/0/{page}/"},
+    {"title": "Son Filmler", "url": "/api/movie/by/filtres/0/created/{page}/"},
+    {"title": "Türkçe Dublaj", "url": "/api/movie/by/filtres/26/created/{page}/"},
+    {"title": "Türkçe Altyazı", "url": "/api/movie/by/filtres/27/created/{page}/"},
+    {"title": "Son Diziler", "url": "/api/serie/by/filtres/0/created/{page}/"},
+    {"title": "Aksiyon", "url": "/api/movie/by/filtres/1/created/{page}/"},
+    {"title": "Komedi", "url": "/api/movie/by/filtres/3/created/{page}/"},
+    {"title": "Korku", "url": "/api/movie/by/filtres/8/created/{page}/"},
+    {"title": "Aile", "url": "/api/movie/by/filtres/14/created/{page}/"},
+    {"title": "Bilim Kurgu", "url": "/api/movie/by/filtres/4/created/{page}/"}
 ]
 
 class RecTV:
@@ -42,144 +49,144 @@ class RecTV:
         })
         self.base_url = None
         self.token = None
+        self.seen_ids = set() # Aynı içerikleri tekrar eklememek için
 
     def get_firebase_domain(self):
-        print("🌍 Güncel adres Firebase üzerinden sorgulanıyor...")
-        url = f"https://firebaseremoteconfig.googleapis.com/v1/projects/{FB_PROJECT_ID}/namespaces/firebase:fetch"
+        print("🌍 Güncel adres aranıyor...")
+        # Firebase başarısız olursa diye manuel liste
+        manual_fallbacks = [
+            "https://m.prectv60.lol",
+            "https://m.prectv61.lol",
+            "http://m.rectv.xyz"
+        ]
         
-        body = {
-            "appId": FB_APP_ID,
-            "appInstanceId": "randomId123",
-            "appVersion": "19.2.2"
-        }
-        
+        # Önce Firebase
         try:
-            r = requests.post(url, json=body, timeout=10)
+            url = f"https://firebaseremoteconfig.googleapis.com/v1/projects/{FB_PROJECT_ID}/namespaces/firebase:fetch"
+            body = {"appId": FB_APP_ID, "appInstanceId": "valid_id", "appVersion": "19.2.2"}
+            r = requests.post(url, json=body, timeout=5)
             if r.status_code == 200:
-                data = r.json()
-                api_url = data.get("entries", {}).get("api_url")
+                api_url = r.json().get("entries", {}).get("api_url")
                 if api_url:
-                    clean_url = api_url.replace("/api/", "").rstrip("/")
-                    print(f"✅ Domain Bulundu: {clean_url}")
-                    self.base_url = clean_url
-                    return True
-        except Exception as e:
-            print(f"⚠️ Firebase Hatası: {e}")
+                    self.base_url = api_url.replace("/api/", "").rstrip("/")
+                    print(f"✅ Firebase Domain: {self.base_url}")
+                    return
+        except:
+            pass
+
+        # Firebase olmazsa manuel dene
+        print("⚠️ Firebase yanıt vermedi, manuel domainler deneniyor...")
+        for domain in manual_fallbacks:
+            try:
+                r = self.session.get(f"{domain}/api/attest/nonce", timeout=3)
+                if r.status_code == 200:
+                    self.base_url = domain
+                    print(f"✅ Çalışan Domain: {domain}")
+                    return
+            except:
+                continue
         
-        print("⚠️ Firebase başarısız, varsayılan domain kullanılıyor.")
+        # Hiçbiri çalışmazsa varsayılan
         self.base_url = "https://m.prectv60.lol"
-        return True
 
     def login(self):
-        if not self.base_url:
-            self.get_firebase_domain()
-
-        print("🔑 Token alınıyor...")
-        nonce_url = f"{self.base_url}/api/attest/nonce"
+        if not self.base_url: self.get_firebase_domain()
         
         try:
-            # 1. Nonce İsteği
-            r = self.session.get(nonce_url, timeout=15)
-            
-            if r.status_code != 200:
-                print(f"❌ Nonce HTTP Hatası: {r.status_code}")
-                return False
-
-            try:
-                resp_json = r.json()
-            except:
-                print(f"❌ JSON Parse Hatası: {r.text}")
-                return False
-
-            # DÜZELTME BURADA: Hem 'token' hem 'nonce' anahtarlarını kontrol ediyoruz.
-            token = resp_json.get("token") or resp_json.get("nonce")
+            r = self.session.get(f"{self.base_url}/api/attest/nonce", timeout=TIMEOUT)
+            data = r.json()
+            # Token veya Nonce hangisi varsa al
+            token = data.get("token") or data.get("nonce")
             
             if not token:
-                print(f"❌ Token/Nonce bulunamadı! Gelen JSON: {resp_json}")
+                print("❌ Token alınamadı.")
                 return False
 
-            # 2. Verify İsteği
-            verify_url = f"{self.base_url}/api/attest/verify"
-            
-            # Token'ı header'a ekle (Bearer Token olarak)
             self.session.headers.update({"Authorization": f"Bearer {token}"})
-            
-            # Verify isteği (Boş body ile)
-            v = self.session.post(verify_url, json={}, timeout=10)
-            
-            # Verify sonucu 200 dönmese bile token genellikle okuma işlemleri için geçerlidir.
-            if v.status_code == 200:
-                print("✅ Token başarıyla doğrulandı.")
-            else:
-                print(f"⚠️ Token doğrulama uyarısı ({v.status_code}), ama devam ediliyor.")
-
+            # Verify formalite, 400 dönse de devam ediyoruz
+            self.session.post(f"{self.base_url}/api/attest/verify", json={}, timeout=TIMEOUT)
             self.token = token
+            print("✅ Token alındı.")
             return True
-
         except Exception as e:
-            print(f"❌ Login Exception: {e}")
+            print(f"❌ Login Hatası: {e}")
             return False
 
     def process_link(self, raw_link):
-        if not raw_link: return None
-        
-        if "otolinkaff" in raw_link: return None
-
-        # Worker Bypass (Smali loadLinks fonksiyonu)
+        if not raw_link or "otolinkaff" in raw_link: return None
         if "1.cf32-2c8.workers.dev" in raw_link:
-            random_domain = random.choice(BYPASS_DOMAINS)
-            path = raw_link.split(".dev/")[-1]
-            return f"{random_domain}{path}"
-            
+            return f"{random.choice(BYPASS_DOMAINS)}{raw_link.split('.dev/')[-1]}"
         return raw_link
 
     def get_content(self):
-        # Dosyayı baştan oluştur
-        with open("playlist.m3u", "w", encoding="utf-8") as f:
-            f.write("#EXTM3U\n")
-
-        if not self.login():
-            return
+        if not self.login(): return "#EXTM3U\n"
 
         m3u_content = "#EXTM3U\n"
-        count = 0
+        total_count = 0
 
         for cat in CATEGORIES:
-            print(f"📂 Taranıyor: {cat['title']}")
-            url = f"{self.base_url}{cat['url']}{SW_KEY}"
+            print(f"\n📂 Kategori Başlıyor: {cat['title']}")
             
-            try:
-                # Token zaten session header'ında var
-                r = self.session.get(url, timeout=15)
-                if r.status_code == 200:
+            for page in range(1, MAX_PAGES + 1):
+                # {page} kısmını gerçek sayfa numarasıyla değiştir
+                url = f"{self.base_url}{cat['url'].format(page=page)}{SW_KEY}"
+                
+                try:
+                    # Sunucuyu yormamak için minik bekleme
+                    time.sleep(0.2)
+                    
+                    r = self.session.get(url, timeout=TIMEOUT)
+                    if r.status_code != 200:
+                        print(f"   -> Sayfa {page} bitti veya hata (Kod: {r.status_code})")
+                        break
+                    
                     data = r.json()
-                    if isinstance(data, list):
-                        for item in data:
-                            title = item.get("title", "Bilinmeyen").strip().replace(",", " ")
-                            image = item.get("image", "")
-                            sources = item.get("sources", [])
-                            
-                            if sources:
-                                raw_url = sources[0].get("url")
-                                final_url = self.process_link(raw_url)
-                                
-                                if final_url:
-                                    # Smali loadLinks referer header taklidi
-                                    m3u_content += f'#EXTINF:-1 group-title="{cat["title"]}" tvg-logo="{image}" http-referrer="https://twitter.com/",{title}\n'
-                                    m3u_content += f"{final_url}\n"
-                                    count += 1
-            except Exception as e:
-                print(f"⚠️ Hata ({cat['title']}): {e}")
+                    if not data or not isinstance(data, list) or len(data) == 0:
+                        print(f"   -> Sayfa {page} boş, kategori tamamlandı.")
+                        break
 
-        with open("playlist.m3u", "w", encoding="utf-8") as f:
-            f.write(m3u_content)
-        
-        print(f"🎉 İşlem Bitti. Toplam {count} içerik eklendi.")
+                    page_added = 0
+                    for item in data:
+                        # ID kontrolü (Sonsuz döngü veya tekrarı önlemek için)
+                        item_id = item.get("id")
+                        if item_id in self.seen_ids:
+                            continue
+                        
+                        self.seen_ids.add(item_id)
+                        
+                        title = item.get("title", "Bilinmeyen").strip().replace(",", " ")
+                        image = item.get("image", "")
+                        sources = item.get("sources", [])
+                        
+                        if sources:
+                            raw_url = sources[0].get("url")
+                            final_url = self.process_link(raw_url)
+                            
+                            if final_url:
+                                m3u_content += f'#EXTINF:-1 group-title="{cat["title"]}" tvg-logo="{image}" http-referrer="https://twitter.com/",{title}\n'
+                                m3u_content += f"{final_url}\n"
+                                page_added += 1
+                                total_count += 1
+                    
+                    print(f"   -> Sayfa {page}: {page_added} içerik eklendi.")
+                    
+                    # Eğer bu sayfada hiç yeni içerik yoksa diğer sayfalara bakmaya gerek yok
+                    if page_added == 0:
+                        break
+
+                except Exception as e:
+                    print(f"   -> Sayfa Hatası: {e}")
+                    break
+
+        print(f"\n🎉 TOPLAM {total_count} İÇERİK M3U DOSYASINA YAZILDI.")
+        return m3u_content
 
 if __name__ == "__main__":
     try:
         app = RecTV()
-        app.get_content()
+        playlist = app.get_content()
+        with open("playlist.m3u", "w", encoding="utf-8") as f:
+            f.write(playlist)
     except Exception as e:
         print(f"Kritik Hata: {e}")
         if not os.path.exists("playlist.m3u"):
