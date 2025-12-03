@@ -1,6 +1,5 @@
-from seleniumbase import SB
-from bs4 import BeautifulSoup
-import requests
+from DrissionPage import ChromiumPage, ChromiumOptions
+from curl_cffi import requests as crequests
 import json
 import re
 import base64
@@ -16,13 +15,11 @@ import random
 # --- AYARLAR ---
 PASSPHRASE = "3hPn4uCjTVtfYWcjIcoJQ4cL1WWk1qxXI39egLYOmNv6IblA7eKJz68uU3eLzux1biZLCms0quEjTYniGv5z1JcKbNIsDQFSeIZOBZJz4is6pD7UyWDggWWzTLBQbHcQFpBQdClnuQaMNUHtLHTpzCvZy33p6I7wFBvL4fnXBYH84aUIyWGTRvM2G5cfoNf4705tO2kv"
 DOMAIN_LIST_URL = "https://raw.githubusercontent.com/Kraptor123/domainListesi/refs/heads/main/eklenti_domainleri.txt"
-DEFAULT_DOMAIN = "https://dizipal1515.com" 
+DEFAULT_DOMAIN = "https://dizipal1515.com" # Yedek
 OUTPUT_FILE = "playlist.m3u"
-MAX_WORKERS = 10
+MAX_WORKERS = 20 # Hız için yüksek thread sayısı
 
-# Uygulamanın kullandığı User-Agent (Smali'den alındı)
-APP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"
-
+# Eklentideki kategori ID'leri
 CATEGORIES = [
     {"id": "0", "name": "Yeni Eklenenler"},
     {"id": "1", "name": "Exxen"},
@@ -36,11 +33,13 @@ CATEGORIES = [
 ]
 
 class CryptoUtils:
+    """AES Şifre Çözücü (Smali kodunun Python karşılığı)"""
     def decrypt(self, salt_hex, iv_hex, ciphertext_b64):
         try:
             salt = bytes.fromhex(salt_hex)
             iv = bytes.fromhex(iv_hex)
             ciphertext = base64.b64decode(ciphertext_b64)
+            # Java'daki PBKDF2WithHmacSHA512 algoritması
             key = PBKDF2(PASSPHRASE, salt, dkLen=32, count=1000, hmac_hash_module=SHA512)
             cipher = AES.new(key, AES.MODE_CBC, iv)
             decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
@@ -48,217 +47,221 @@ class CryptoUtils:
         except:
             return None
 
-class DiziManager:
+class AuthManager:
+    """Cloudflare'i geçip cKey/cValue/Cookie çalan sınıf"""
     def __init__(self):
-        self.domain = self._get_domain()
+        self.domain = self.find_domain()
         self.cookies = None
-        self.user_agent = None
+        self.ua = None
         self.cKey = None
         self.cValue = None
-        self.crypto = CryptoUtils()
 
-    def _get_domain(self):
+    def find_domain(self):
+        print("[-] Domain aranıyor...")
         try:
+            # Requests kütüphanesi ile Github'dan domaini al
+            import requests
             r = requests.get(DOMAIN_LIST_URL, timeout=5)
             if r.status_code == 200:
                 parts = r.text.split('|')
                 for part in parts:
                     if "DiziPalOrijinal" in part:
                         d = part.split(':', 1)[1].strip().rstrip('/')
-                        print(f"[INFO] Domain: {d}")
+                        print(f"[OK] Domain: {d}")
                         return d
         except: pass
         return DEFAULT_DOMAIN
 
-    def bypass_cloudflare_and_login(self):
-        """
-        SeleniumBase UC Modu ile siteye girer, kaynak kodunu regex ile tarar.
-        """
-        print("[-] Tarayıcı başlatılıyor (SeleniumBase UC)...")
+    def get_auth_data(self):
+        print("[-] Tarayıcı (DrissionPage) başlatılıyor...")
         
-        # headless=False: Xvfb olduğu için GUI modunda açıyoruz (CF için daha iyi)
-        with SB(uc=True, headless=False, agent=APP_USER_AGENT) as sb:
-            try:
-                print(f"[-] Siteye gidiliyor: {self.domain}")
+        # Linux sunucu için ayarlar
+        co = ChromiumOptions()
+        co.set_argument('--no-sandbox')
+        co.set_argument('--disable-gpu')
+        # Linux'ta olduğumuz için mecburen headless, ama DrissionPage bunu gizler
+        co.set_argument('--headless=new') 
+        # Eklentinin User-Agent'ını taklit et
+        co.set_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0")
+        
+        page = ChromiumPage(co)
+        
+        try:
+            print(f"[-] {self.domain} adresine gidiliyor...")
+            page.get(self.domain)
+            
+            # Cloudflare Turnstile kontrolü (Otomatik geçer)
+            if page.ele('@id=challenge-stage', timeout=2):
+                 print("[-] Cloudflare Challenge algılandı, bekleniyor...")
+            
+            # Sayfanın yüklenmesini ve cKey inputunun gelmesini bekle (Max 40sn)
+            # Eklenti: input name="cKey"
+            ele = page.wait.ele('css:input[name="cKey"]', timeout=40)
+            
+            if ele:
+                print("[OK] Site açıldı! Veriler çalınıyor...")
+                self.cKey = page.ele('css:input[name="cKey"]').attr('value')
+                self.cValue = page.ele('css:input[name="cValue"]').attr('value')
+                self.ua = page.user_agent
                 
-                # Cloudflare'i zorla geçmek için reconnect kullanıyoruz
-                sb.uc_open_with_reconnect(self.domain, reconnect_time=6)
+                # Cookie'leri al
+                cookies_list = page.cookies.as_dict()
+                # Requests formatına çevir string olarak
+                self.cookies = cookies_list
                 
-                # Captcha varsa tıkla
-                try: sb.uc_gui_click_captcha()
-                except: pass
-                
-                print("[-] Sayfa yüklenmesi bekleniyor...")
-                time.sleep(5) # JavaScriptlerin çalışması için bekle
-                
-                # Sayfayı biraz kaydır (Lazy load veya tetikleyiciler için)
-                sb.scroll_to_bottom()
-                time.sleep(2)
-                
-                # Kaynak kodunu al
-                page_source = sb.get_page_source()
-                
-                # Regex ile cKey ve cValue ara (HTML elementini beklemek yerine text içinde arıyoruz)
-                # input name="cKey" value="XYZ"
-                print("[-] Tokenlar Regex ile aranıyor...")
-                
-                ckey_match = re.search(r'name=["\']cKey["\']\s+value=["\']([^"\']+)["\']', page_source)
-                cvalue_match = re.search(r'name=["\']cValue["\']\s+value=["\']([^"\']+)["\']', page_source)
-                
-                if ckey_match and cvalue_match:
-                    self.cKey = ckey_match.group(1)
-                    self.cValue = cvalue_match.group(1)
-                else:
-                    # Belki sıralama farklıdır: value="XYZ" name="cKey"
-                    ckey_match = re.search(r'value=["\']([^"\']+)["\']\s+name=["\']cKey["\']', page_source)
-                    cvalue_match = re.search(r'value=["\']([^"\']+)["\']\s+name=["\']cValue["\']', page_source)
-                    
-                    if ckey_match and cvalue_match:
-                        self.cKey = ckey_match.group(1)
-                        self.cValue = cvalue_match.group(1)
-                
-                if self.cKey and self.cValue:
-                    # Cookie ve UA al
-                    self.user_agent = sb.get_user_agent()
-                    cookies_list = sb.get_cookies()
-                    self.cookies = {c['name']: c['value'] for c in cookies_list}
-                    
-                    print(f"[OK] Token Bulundu: {self.cKey[:5]}...")
-                    return True
-                else:
-                    print("[FATAL] Tokenlar kaynak kodunda bulunamadı.")
-                    # Debug: Sayfa başlığını ve kaynağın bir kısmını yazdır
-                    print(f"Title: {sb.get_title()}")
-                    print(f"HTML Sample: {page_source[:500]}")
-                    return False
-                
-            except Exception as e:
-                print(f"[FATAL] Tarayıcı hatası: {e}")
+                print(f"[OK] Kimlik doğrulama başarılı. Token: {self.cKey[:5]}...")
+                return True
+            else:
+                print("[FATAL] Site açıldı ama tokenlar bulunamadı.")
+                print(f"Title: {page.title}")
                 return False
+                
+        except Exception as e:
+            print(f"[FATAL] Tarayıcı hatası: {e}")
+            return False
+        finally:
+            page.quit()
 
-    def get_requests_session(self):
-        s = requests.Session()
-        s.cookies.update(self.cookies)
-        s.headers.update({
-            "User-Agent": self.user_agent,
+class FastCrawler:
+    """Çalınan verilerle API'ye saldıran sınıf"""
+    def __init__(self, auth_data):
+        self.domain = auth_data.domain
+        self.cKey = auth_data.cKey
+        self.cValue = auth_data.cValue
+        self.crypto = CryptoUtils()
+        
+        # curl_cffi session (TLS parmak izi taklidi yapar)
+        self.session = crequests.Session(impersonate="chrome110")
+        self.session.cookies.update(auth_data.cookies)
+        self.session.headers.update({
+            "User-Agent": auth_data.ua,
             "Referer": f"{self.domain}/",
             "Origin": self.domain,
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "*/*"
         })
-        return s
 
-def worker_task(domain, session, crypto, cat_id, cat_name):
-    api_url = f"{domain}/bg/getserielistbychannel"
-    
-    payload = {
-        "cKey": session.cKey_val,
-        "cValue": session.cValue_val,
-        "curPage": "1",
-        "channelId": cat_id,
-        "languageId": "2,3,4"
-    }
-    
-    results = []
-    try:
-        r = session.post(api_url, data=payload, timeout=20)
-        if r.status_code == 200:
-            try:
-                html_data = r.json().get('data', {}).get('html', '')
-            except:
-                # JSON dönmezse HTML dönmüş olabilir mi?
-                html_data = r.text
-
-            matches = re.findall(r'href="([^"]+)".*?text-white text-sm">([^<]+)', html_data, re.DOTALL)
-            
-            print(f"    > {cat_name}: {len(matches)} içerik bulundu.")
-            
-            for href, title in matches:
-                full_url = href if href.startswith("http") else f"{domain}{href}"
-                
-                try:
-                    r_det = session.get(full_url, timeout=10)
-                    enc_match = re.search(r'data-rm-k=["\'](.*?)["\']', r_det.text)
-                    
-                    final_link = None
-                    if enc_match:
-                        json_str = enc_match.group(1).replace('&quot;', '"')
-                        try:
-                            jdata = json.loads(json_str)
-                            decrypted = crypto.decrypt(jdata['salt'], jdata['iv'], jdata['ciphertext'])
-                            if decrypted:
-                                ifr_m = re.search(r'src="([^"]+)"', decrypted)
-                                if ifr_m:
-                                    ifr_url = ifr_m.group(1)
-                                    if not ifr_url.startswith("http"): ifr_url = domain + ifr_url
-                                    
-                                    r_ifr = session.get(ifr_url, headers={"Referer": domain}, timeout=10)
-                                    
-                                    # m3u8 veya mp4 ara
-                                    vid_m = re.search(r'file:\s*["\']([^"\']+\.(?:m3u8|mp4)[^"\']*)["\']', r_ifr.text)
-                                    if vid_m: final_link = vid_m.group(1)
-                                    else:
-                                        # source: '...'
-                                        src_m = re.search(r'source:\s*["\']([^"\']+)["\']', r_ifr.text)
-                                        if src_m: final_link = src_m.group(1)
-                        except: pass
-                    
-                    if final_link:
-                        # Türkçe karakterleri düzelt
-                        clean_title = title.strip()
-                        m3u = (
-                            f'#EXTINF:-1 group-title="{cat_name}",{clean_title}\n'
-                            f'#EXTVLCOPT:http-user-agent={session.headers["User-Agent"]}\n'
-                            f'#EXTVLCOPT:http-referrer={domain}/\n'
-                            f'{final_link}\n'
-                        )
-                        results.append(m3u)
-                except:
-                    continue
-    except Exception as e:
-        pass
+    def get_category_items(self, cat_id):
+        """API'den kategori içeriğini çeker (HIZLI)"""
+        url = f"{self.domain}/bg/getserielistbychannel"
+        data = {
+            "cKey": self.cKey,
+            "cValue": self.cValue,
+            "curPage": "1",
+            "channelId": cat_id,
+            "languageId": "2,3,4"
+        }
         
-    return results
+        try:
+            # Cloudflare bypasslı request
+            r = self.session.post(url, data=data, timeout=15)
+            if r.status_code == 200:
+                try:
+                    # Yanıt JSON içindeki HTML
+                    js = r.json()
+                    html = js.get('data', {}).get('html', '')
+                    
+                    # Regex ile linkleri sök
+                    items = []
+                    matches = re.findall(r'href="([^"]+)".*?text-white text-sm">([^<]+)', html, re.DOTALL)
+                    for link, title in matches:
+                        full_link = link if link.startswith("http") else f"{self.domain}{link}"
+                        items.append({"title": title.strip(), "url": full_link})
+                    return items
+                except: pass
+        except Exception as e:
+            print(f"    Kategori hatası: {e}")
+        return []
+
+    def resolve_video(self, url):
+        """Video sayfasındaki şifreyi çözer (Deep Crawl)"""
+        try:
+            r = self.session.get(url, timeout=10)
+            # Şifreli JSON'u bul
+            match = re.search(r'data-rm-k=["\'](.*?)["\']', r.text)
+            if match:
+                json_str = match.group(1).replace('&quot;', '"')
+                data = json.loads(json_str)
+                
+                decrypted = self.crypto.decrypt(data['salt'], data['iv'], data['ciphertext'])
+                if decrypted:
+                    # İframe linkini al
+                    ifr_match = re.search(r'src="([^"]+)"', decrypted)
+                    if ifr_match:
+                        ifr_url = ifr_match.group(1)
+                        if not ifr_url.startswith("http"): ifr_url = self.domain + ifr_url
+                        
+                        # İframe'e git
+                        r2 = self.session.get(ifr_url, headers={"Referer": self.domain}, timeout=10)
+                        
+                        # .m3u8 veya .mp4 bul
+                        vid_match = re.search(r'file:\s*["\']([^"\']+\.(?:m3u8|mp4)[^"\']*)["\']', r2.text)
+                        if vid_match: return vid_match.group(1)
+                        
+                        # Alternatif kaynak
+                        src_match = re.search(r'source:\s*["\']([^"\']+)["\']', r2.text)
+                        if src_match: return src_match.group(1)
+        except:
+            pass
+        return None
+
+def worker(crawler, item, category):
+    try:
+        # Rastgele bekleme yok, olabildiğince hızlı
+        link = crawler.resolve_video(item['url'])
+        if link and link.startswith("http"):
+            return (
+                f'#EXTINF:-1 group-title="{category}",{item["title"]}\n'
+                f'#EXTVLCOPT:http-user-agent={crawler.session.headers["User-Agent"]}\n'
+                f'#EXTVLCOPT:http-referrer={crawler.domain}/\n'
+                f'{link}\n'
+            )
+    except:
+        pass
+    return None
 
 def main():
-    print("--- DiziPal SeleniumBase V7 ---")
+    print("--- DiziPal Ultimate Sync ---")
     
-    mgr = DiziManager()
-    
-    if not mgr.bypass_cloudflare_and_login():
+    # AŞAMA 1: GÜVENLİ GİRİŞ (Browser)
+    auth = AuthManager()
+    if not auth.get_auth_data():
+        print("[FATAL] Giriş yapılamadı. Github IP'si banlanmış olabilir.")
         sys.exit(1)
         
-    session = mgr.get_requests_session()
-    # Worker'lara taşımak için
-    session.cKey_val = mgr.cKey
-    session.cValue = mgr.cValue
+    # AŞAMA 2: HIZLI TARAMA (API)
+    print("[-] Oturum bilgileri API istemcisine aktarılıyor...")
+    crawler = FastCrawler(auth)
     
-    crypto = mgr.crypto
-    domain = mgr.domain
-    
-    print("[-] Tarama başlıyor...")
     playlist = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
         for cat in CATEGORIES:
-            futures.append(executor.submit(worker_task, domain, session, crypto, cat['id'], cat['name']))
+            print(f"[-] Kategori taranıyor: {cat['name']}")
+            items = crawler.get_category_items(cat['id'])
+            print(f"    {len(items)} içerik bulundu.")
             
+            for item in items:
+                futures.append(executor.submit(worker, crawler, item, cat['name']))
+        
+        print(f"[-] {len(futures)} içerik için video linkleri çözülüyor...")
         completed = 0
         for f in concurrent.futures.as_completed(futures):
             res = f.result()
-            if res: playlist.extend(res)
+            if res: playlist.append(res)
             completed += 1
-            print(f"    Kategori İlerlemesi: {completed}/{len(CATEGORIES)}")
+            if completed % 20 == 0: print(f"    İlerleme: {completed}/{len(futures)}")
 
+    # KAYDET
     if playlist:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
-            for entry in playlist:
-                f.write(entry)
-        print(f"\n[BAŞARILI] {len(playlist)} içerik kaydedildi.")
+            for p in playlist:
+                f.write(p)
+        print(f"[BAŞARILI] {len(playlist)} içerik {OUTPUT_FILE} dosyasına yazıldı.")
     else:
-        print("\n[UYARI] Liste boş kaldı.")
+        print("[UYARI] Liste boş.")
 
 if __name__ == "__main__":
     main()
