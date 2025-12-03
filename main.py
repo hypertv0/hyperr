@@ -5,138 +5,144 @@ import concurrent.futures
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 import sys
-import re
 import urllib3
+import random
 
-# SSL Uyarılarını Kapat
+# SSL Sertifika Hatalarını Görmezden Gel
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- YAPILANDIRMA ---
+# --- SABİT AYARLAR ---
 STATIC_AES_KEY = "ywevqtjrurkwtqgz"
-USER_AGENT = "speedrestapi"
+# User-Agent: Samsung Galaxy S10 taklidi yaparak engellemeyi aşmayı dener
+USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 10; SM-G973F Build/QP1A.190711.020)"
 X_REQUESTED_WITH = "com.bp.box"
 REFERER_URL = "https://speedrestapi.com/"
 
-# Kaynaklar
-PRIMARY_URL = "https://prod-eu-central.pages.dev/a03c6a7ae48351c6408e00c8159e6e64/certificates/client.pem"
-FALLBACK_URL = "https://static.staticsave.com/conn/ct.js"
-
-# Eğer otomatik bulma çalışmazsa denenecek acil durum adresleri
-EMERGENCY_DOMAINS = [
-    "http://inattv20.cf",
-    "http://inattv38.xyz",
-    "http://inattv50.cf"
-]
+# Bu adresler GitHub IP'lerinden genellikle engellidir ama yine de dursun
+PRIMARY_CERT = "https://prod-eu-central.pages.dev/a03c6a7ae48351c6408e00c8159e6e64/certificates/client.pem"
+FALLBACK_CT = "https://static.staticsave.com/conn/ct.js"
 
 OUTPUT_FILE = "playlist.m3u"
-MAX_WORKERS = 20
+MAX_WORKERS = 30  # Tarama hızı için yüksek thread sayısı
 
 class InatCrypto:
     def __init__(self):
         self.block_size = AES.block_size
 
     def decrypt(self, encrypted_text, key_text):
-        """Esnek şifre çözme: Hata olsa bile veriyi kurtarmaya çalışır."""
+        """AES-128-CBC Şifre Çözme (IV = Key)"""
         try:
             if not encrypted_text or not key_text: return None
-            
             key = key_text.encode('utf-8')
-            iv = key # IV = Key
+            # Uygulamada IV, Key ile aynı byte dizisidir
+            iv = key 
             
-            # Base64 temizliği
+            # Base64 fix
             encrypted_text = encrypted_text.strip().replace('\n', '').replace('\r', '')
             pad = len(encrypted_text) % 4
-            if pad:
-                encrypted_text += '=' * (4 - pad)
+            if pad: encrypted_text += '=' * (4 - pad)
             
             cipher = AES.new(key, AES.MODE_CBC, iv)
             decoded = base64.b64decode(encrypted_text)
-            
-            # Padding hatası olsa bile decrypt edilmiş ham veriyi al
             decrypted_raw = cipher.decrypt(decoded)
             
-            # Padding'i manuel temizle (PKCS7) veya text decode et
+            # Padding temizleme (Hata toleranslı)
             try:
                 return unpad(decrypted_raw, self.block_size).decode('utf-8')
             except:
-                # Padding bozuksa utf-8 decode edip "printable" karakterleri al
                 return decrypted_raw.decode('utf-8', errors='ignore').strip()
-                
-        except Exception as e:
+        except:
             return None
 
-class InatDomainFinder:
+class InatScanner:
     def __init__(self, session, crypto):
         self.session = session
         self.crypto = crypto
 
-    def extract_url_via_regex(self, text):
-        """Metin içindeki http/https linkini bulur."""
-        if not text: return None
-        # URL regex (basit)
-        match = re.search(r'(https?://[a-zA-Z0-9.-]+(?:\.[a-zA-Z]{2,})+(?::\d+)?)', text)
-        if match:
-            return match.group(1)
+    def check_url(self, domain):
+        """Bir domainin aktif Inat sunucusu olup olmadığını dener."""
+        try:
+            # URL sonundaki slash'i temizle
+            base = domain.rstrip('/')
+            # API'ye boş bir POST isteği at (Ana sayfa verisi için)
+            url = f"{base}/"
+            
+            # API, şifreli bir body bekler: 1=KEY&0=KEY
+            payload = f"1={STATIC_AES_KEY}&0={STATIC_AES_KEY}"
+            
+            # Timeout'u kısa tutuyoruz ki hızlı tarasın (3 saniye)
+            r = self.session.post(url, data=payload, timeout=3, verify=False)
+            
+            # 200 OK dönerse ve içerik şifreli formatta ise (Data:Key) bu doğru sunucudur
+            if r.status_code == 200:
+                if ":" in r.text or "chName" in r.text or "diziName" in r.text:
+                    return base
+        except:
+            pass
         return None
 
-    def find(self):
-        domain = None
+    def scan_brute_force(self):
+        """Olası domainleri (inattv100.xyz ... inattv180.xyz) tarar."""
+        print("[-] Statik kaynaklara erişilemedi. Aktif sunucu taranıyor...")
         
-        # 1. Yöntem: Client.pem
-        print("[-] Kaynak 1 (Client.pem) taranıyor...")
+        potential_urls = []
+        
+        # 1. Olasılık: .xyz uzantılı domainler (En yaygın)
+        # Güncel aralık genellikle 120-170 arasıdır.
+        for i in range(110, 180):
+            potential_urls.append(f"https://inattv{i}.xyz")
+            potential_urls.append(f"http://inattv{i}.xyz")
+            
+        # 2. Olasılık: .link ve .com uzantıları
+        for i in range(110, 180):
+            potential_urls.append(f"https://inattv{i}.link")
+            potential_urls.append(f"https://inattv{i}.com")
+
+        found_domain = None
+        
+        # Çoklu iş parçacığı ile tarama
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_url = {executor.submit(self.check_url, url): url for url in potential_urls}
+            
+            for future in concurrent.futures.as_completed(future_to_url):
+                result = future.result()
+                if result:
+                    found_domain = result
+                    print(f"[!!!] GÜNCEL SUNUCU BULUNDU: {found_domain}")
+                    # Bulduğumuz anda diğerlerini iptal etmeye çalışalım
+                    executor.shutdown(wait=False)
+                    break
+        
+        return found_domain
+
+    def find_domain(self):
+        # Önce klasik yöntemleri dene (Github IP'si bloklu değilse çalışır)
         try:
-            r = self.session.get(PRIMARY_URL, verify=False, timeout=10)
+            r = self.session.get(PRIMARY_CERT, verify=False, timeout=5)
             if r.status_code == 200:
                 content = r.text.replace("-----BEGIN CERTIFICATE-----", "").replace("-----END CERTIFICATE-----", "").strip()
                 parts = content.split(':')
                 if len(parts) >= 2:
-                    # Katman 1
                     l1 = self.crypto.decrypt(parts[0], parts[1])
                     if l1:
-                        l1_parts = l1.split(':')
-                        if len(l1_parts) >= 2:
-                            # Katman 2
-                            final = self.crypto.decrypt(l1_parts[0], l1_parts[1])
-                            # JSON parse deneme
-                            try:
-                                data = json.loads(final)
-                                if "DC10" in data: domain = data["DC10"]
-                            except:
-                                # JSON değilse Regex ile URL ara
-                                domain = self.extract_url_via_regex(final)
-        except Exception as e:
-            print(f"    Hata: {e}")
+                        l1p = l1.split(':')
+                        fin = self.crypto.decrypt(l1p[0], l1p[1])
+                        d = json.loads(fin)
+                        if "DC10" in d: return d["DC10"]
+        except: pass
 
-        if domain: return domain
-
-        # 2. Yöntem: Fallback ct.js
-        print("[-] Kaynak 2 (ct.js) taranıyor...")
+        # Fallback
         try:
-            r = self.session.get(FALLBACK_URL, verify=False, timeout=10)
+            r = self.session.get(FALLBACK_CT, verify=False, timeout=5)
             if r.status_code == 200:
-                content = r.text.strip()
-                
-                # A: Direkt metin içinde URL var mı?
-                domain = self.extract_url_via_regex(content)
-                
-                # B: Şifreli olabilir, çözüp bakalım
-                if not domain:
-                    decrypted = self.crypto.decrypt(content, STATIC_AES_KEY)
-                    if decrypted:
-                        # JSON mu?
-                        try:
-                            data = json.loads(decrypted)
-                            if "DC10" in data: domain = data["DC10"]
-                        except:
-                            pass
-                        # Değilse Regex ile URL ara
-                        if not domain:
-                            domain = self.extract_url_via_regex(decrypted)
+                txt = r.text.strip()
+                if txt.startswith("http"): return txt
+                dec = self.crypto.decrypt(txt, STATIC_AES_KEY)
+                if dec and "http" in dec: return dec
+        except: pass
 
-        except Exception as e:
-            print(f"    Hata: {e}")
-
-        return domain
+        # Hiçbiri çalışmadıysa TARAMA MODUNA geç
+        return self.scan_brute_force()
 
 class InatProcessor:
     def __init__(self):
@@ -146,59 +152,42 @@ class InatProcessor:
             "User-Agent": USER_AGENT,
             "X-Requested-With": X_REQUESTED_WITH,
             "Referer": REFERER_URL,
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Accept": "*/*"
         })
         
-        # Domain Bulma Süreci
-        finder = InatDomainFinder(self.session, self.crypto)
-        self.base_url = finder.find()
-
-        # Eğer hala bulunamadıysa acil durum listesini dene
-        if not self.base_url:
-            print("[!] Dinamik domain bulunamadı, acil durum listesi deneniyor...")
-            for url in EMERGENCY_DOMAINS:
-                print(f"    Deneniyor: {url}")
-                try:
-                    # Test isteği atalım
-                    test = self.make_request(url, "")
-                    if test: 
-                        self.base_url = url
-                        print(f"[+] Çalışan acil durum domaini: {url}")
-                        break
-                except:
-                    continue
+        scanner = InatScanner(self.session, self.crypto)
+        self.base_url = scanner.find_domain()
         
         if self.base_url:
             self.base_url = self.base_url.rstrip('/')
 
-    def make_request(self, domain, path):
-        url = f"{domain}/{path.lstrip('/')}"
+    def api_request(self, path=""):
+        if not self.base_url: return None
+        url = f"{self.base_url}/{path.lstrip('/')}"
         payload = f"1={STATIC_AES_KEY}&0={STATIC_AES_KEY}"
+        
         try:
-            r = self.session.post(url, data=payload, verify=False, timeout=15)
+            r = self.session.post(url, data=payload, verify=False, timeout=20)
             if r.status_code != 200: return None
             
-            # Yanıt şifreli mi?
-            if ":" in r.text:
-                parts = r.text.split(':')
+            text = r.text
+            # Şifreli yanıt
+            if ":" in text:
+                parts = text.split(':')
                 l1 = self.crypto.decrypt(parts[0], STATIC_AES_KEY)
                 if not l1: return None
-                
-                l1_parts = l1.split(':')
-                if len(l1_parts) < 1: return None
-                
-                final = self.crypto.decrypt(l1_parts[0], STATIC_AES_KEY)
-                return json.loads(final) if final else None
-            else:
-                return json.loads(r.text)
+                l1p = l1.split(':')
+                fin = self.crypto.decrypt(l1p[0], STATIC_AES_KEY)
+                if fin: return json.loads(fin)
+            # Şifresiz yanıt
+            elif "{" in text:
+                return json.loads(text)
         except:
-            return None
+            pass
+        return None
 
-    def get_api_data(self, path=""):
-        if not self.base_url: return None
-        return self.make_request(self.base_url, path)
-
-    def parse_content(self, item, category):
+    def parse_channel(self, item, cat_name):
         try:
             name = item.get('chName', item.get('diziName', 'Bilinmeyen'))
             img = item.get('chImg', item.get('diziImg', ''))
@@ -207,79 +196,94 @@ class InatProcessor:
             
             final_url = ""
             
-            # Canlı Yayın / Direkt Link
+            # Canlı Yayın / Web Linki
             if ctype in ['live_url', 'web', 'link', 'tekli_regex_lb_sh_3']:
                 final_url = url
-            
+                
             # Dizi / Film (Detay İsteği)
             elif ctype in ['dizi', 'film'] or (url and url.endswith('.php')):
-                det = self.get_api_data(url)
-                if det:
-                    if isinstance(det, list) and det:
-                        final_url = det[0].get('diziUrl', det[0].get('chUrl', ''))
-                    elif isinstance(det, dict):
-                        final_url = det.get('diziUrl', det.get('chUrl', ''))
-            
+                # Derin tarama: Video detaylarını çek
+                try:
+                    det = self.api_request(url)
+                    if det:
+                        # Dönen veri liste veya obje olabilir
+                        if isinstance(det, list) and len(det) > 0:
+                            final_url = det[0].get('diziUrl', det[0].get('chUrl', ''))
+                        elif isinstance(det, dict):
+                            final_url = det.get('diziUrl', det.get('chUrl', ''))
+                except: pass
+
+            # URL Kontrolü
             if final_url and final_url.startswith("http"):
-                if any(x in final_url for x in ["yandex", "vk.com", "drive.google"]): return None
+                # Çalışmayan kaynakları ele
+                if any(x in final_url for x in ["yandex", "vk.com", "drive.google", "cloud.mail.ru"]):
+                    return None
                 
-                m3u = f'#EXTINF:-1 tvg-logo="{img}" group-title="{category}",{name}\n'
-                m3u += f'#EXTVLCOPT:http-user-agent={USER_AGENT}\n'
-                m3u += f'#EXTVLCOPT:http-referrer={REFERER_URL}\n'
-                m3u += f"{final_url}\n"
-                return m3u
+                # Boşlukları düzelt
+                final_url = final_url.replace(" ", "%20")
+                
+                # M3U Entry Oluştur
+                entry = f'#EXTINF:-1 tvg-logo="{img}" group-title="{cat_name}",{name}\n'
+                entry += f'#EXTVLCOPT:http-user-agent={USER_AGENT}\n'
+                entry += f'#EXTVLCOPT:http-referrer={REFERER_URL}\n'
+                entry += f"{final_url}\n"
+                return entry
+
         except:
             pass
         return None
 
 def main():
-    print("--- SİSTEM BAŞLATILIYOR ---")
+    print("--- BAŞLATILIYOR ---")
     bot = InatProcessor()
     
     if not bot.base_url:
-        print("[FATAL] Hiçbir domain çalışmadı. İşlem iptal.")
+        print("[FATAL] Hiçbir sunucuya erişilemedi (IP Ban veya Sunucu Kapalı).")
         sys.exit(1)
-        
-    print(f"[SUCCESS] Hedef Domain: {bot.base_url}")
     
-    cats = bot.get_api_data("")
+    print(f"[OK] Hedef: {bot.base_url}")
+    print("[-] Kategoriler alınıyor...")
+    
+    cats = bot.api_request("")
+    
     if not cats:
-        print("[FATAL] Kategori listesi boş.")
+        print("[FATAL] Kategori listesi alınamadı.")
         sys.exit(1)
         
-    print(f"[-] {len(cats)} kategori bulundu. Tarama başlıyor...")
+    print(f"[-] {len(cats)} kategori bulundu. İçerik taranıyor...")
     
     playlist = []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+    # Paralel İşleme
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
         for c in cats:
             c_name = c.get('catName', 'Genel')
             c_url = c.get('catUrl', '')
             
-            if not c_url or any(bad in c_name for bad in ["Hata", "Destek", "Telegram"]):
+            # Gereksiz kategorileri atla
+            if not c_url or any(x in c_name for x in ["Hata", "Destek", "Telegram", "Duyuru"]):
                 continue
-            
-            print(f"   > Kategori İndiriliyor: {c_name}")
-            items = bot.get_api_data(c_url)
+                
+            print(f"   > {c_name}")
+            items = bot.api_request(c_url)
             
             if items and isinstance(items, list):
-                for i in items:
-                    futures.append(ex.submit(bot.parse_content, i, c_name))
+                for item in items:
+                    futures.append(executor.submit(bot.parse_channel, item, c_name))
         
-        print(f"[-] {len(futures)} içerik için detay taraması yapılıyor...")
-        
-        for i, f in enumerate(concurrent.futures.as_completed(futures)):
+        # Sonuçları Topla
+        for f in concurrent.futures.as_completed(futures):
             res = f.result()
             if res: playlist.append(res)
-            if i % 50 == 0: print(f"    İşlenen: {i}/{len(futures)}")
 
+    # Yaz
     if playlist:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
             for p in playlist:
                 f.write(p)
-        print(f"\n[BİTTİ] {len(playlist)} içerik {OUTPUT_FILE} dosyasına kaydedildi.")
+        print(f"\n[BAŞARILI] {len(playlist)} kanal/film eklendi -> {OUTPUT_FILE}")
     else:
         print("\n[UYARI] Liste boş kaldı.")
 
