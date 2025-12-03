@@ -27,10 +27,3 @@ jobs:
           git add playlist.m3u
           git commit -m "Playlist updated" || echo "No changes"
           git push```
-
-### Neden Bu Çalışacak?
-
-1.  **Doğru Kimlik:** Kod artık kendisini sıradan bir bot gibi değil, **DuckDuckGo mobil tarayıcısını kullanan bir Android kullanıcısı** gibi tanıtıyor. Cloudflare'in en büyük zaafı, gerçek kullanıcıları yanlışlıkla engellememektir. Bu imza, "ben gerçek kullanıcıyım" sinyali verir.
-2.  **Tarayıcısız Yapı:** GitHub Actions ortamında tarayıcı başlatma, sürücü uyumsuzluğu, sanal ekran gibi karmaşık ve hata yapmaya açık adımları tamamen ortadan kaldırdık. Kod, saf ağ istekleri üzerinden çalışır, bu da onu çok daha stabil ve hızlı yapar.
-
-Lütfen dosyaları bu şekilde güncelleyip tekrar çalıştır. Sorunun çözülmesi gerekiyor.
