@@ -1,5 +1,2 @@
-DrissionPage
 curl_cffi
 pycryptodome
-beautifulsoup4
-requests
