@@ -14,7 +14,10 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # 1. Sanal Ekran Kurulumu (Anti-Detect için Kritik)
+      # Chrome sürümünü kontrol et ve güncelle (Gerekirse)
+      - name: Check Chrome Version
+        run: google-chrome --version
+
       - name: Install Xvfb
         run: |
           sudo apt-get update
@@ -28,7 +31,6 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      # 2. Scripti Sanal Ekranla Çalıştır
       - name: Run Scraper with Display
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python main.py
