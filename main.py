@@ -11,14 +11,12 @@ import sys
 import time
 
 # --- AYARLAR ---
-# Smali kodundaki "passphrase" (DiziPalOrijinalKt.decrypt içinde kullanılır)
 PASSPHRASE = "3hPn4uCjTVtfYWcjIcoJQ4cL1WWk1qxXI39egLYOmNv6IblA7eKJz68uU3eLzux1biZLCms0quEjTYniGv5z1JcKbNIsDQFSeIZOBZJz4is6pD7UyWDggWWzTLBQbHcQFpBQdClnuQaMNUHtLHTpzCvZy33p6I7wFBvL4fnXBYH84aUIyWGTRvM2G5cfoNf4705tO2kv"
 DOMAIN_LIST_URL = "https://raw.githubusercontent.com/Kraptor123/domainListesi/refs/heads/main/eklenti_domainleri.txt"
 DEFAULT_DOMAIN = "https://dizipal1515.com"
 OUTPUT_FILE = "playlist.m3u"
-MAX_WORKERS = 10
+MAX_WORKERS = 10 
 
-# Kategori Listesi
 CATEGORIES = [
     {"id": "0", "name": "Yeni Eklenen Bölümler"},
     {"id": "1", "name": "Exxen"},
@@ -26,36 +24,27 @@ CATEGORIES = [
     {"id": "10", "name": "Netflix"},
     {"id": "53", "name": "Amazon"},
     {"id": "54", "name": "Apple+"},
-    {"id": "66", "name": "BluTV"}, # ID değişebilir, genelde popülerleri aldım
+    {"id": "66", "name": "BluTV"},
     {"id": "181", "name": "TOD"},
     {"id": "242", "name": "Tabii"}
 ]
 
 class CryptoUtils:
-    """
-    Smali: DiziPalOrijinalKt.smali -> decrypt fonksiyonu.
-    PBKDF2 ile anahtar türetip AES-CBC ile çözer.
-    """
     def decrypt(self, salt_hex, iv_hex, ciphertext_b64):
         try:
             salt = bytes.fromhex(salt_hex)
             iv = bytes.fromhex(iv_hex)
             ciphertext = base64.b64decode(ciphertext_b64)
-            
-            # Android uygulamasında: SecretKeyFactory.getInstance("PBKDF2WithHmacSHA512")
-            # Key uzunluğu: 32 bytes (256 bit), Iteration: 1000 (Java default for specialized specs usually)
             key = PBKDF2(PASSPHRASE, salt, dkLen=32, count=1000, hmac_hash_module=SHA512)
-            
             cipher = AES.new(key, AES.MODE_CBC, iv)
             decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
             return decrypted.decode('utf-8')
-        except Exception:
+        except:
             return None
 
 class DiziScraper:
     def __init__(self):
-        # curl_cffi kullanarak gerçek bir Chrome tarayıcısını taklit ediyoruz
-        # Bu, Cloudflare'in "Checking your browser" ekranını aşar.
+        # Cloudflare'i kandırmak için Chrome taklidi yapıyoruz
         self.session = requests.Session(impersonate="chrome120")
         self.session.headers.update({
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -69,10 +58,8 @@ class DiziScraper:
         self.cValue = None
 
     def find_domain(self):
-        """Github'dan güncel domaini çeker."""
         print("[-] Domain listesi kontrol ediliyor...")
         try:
-            # Burası requests ile yapılabilir çünkü github CF korumalı değil
             r = requests.get(DOMAIN_LIST_URL, timeout=10)
             if r.status_code == 200:
                 parts = r.text.split('|')
@@ -86,42 +73,38 @@ class DiziScraper:
         print(f"[!] Domain bulunamadı, varsayılan: {DEFAULT_DOMAIN}")
         return DEFAULT_DOMAIN
 
-    def init_tokens(self):
-        """Ana sayfaya girip cKey ve cValue değerlerini (CSRF Token) çeker."""
+    def init_session(self):
+        """
+        Siteye ilk girişi yapar ve gerekli Tokenları (cKey, cValue) toplar.
+        """
         print(f"[-] Siteye giriş yapılıyor: {self.domain}")
         try:
             r = self.session.get(self.domain, timeout=20)
             
-            # Cloudflare kontrolü
-            if "Just a moment" in r.text:
-                print("[FATAL] Cloudflare aşılamadı! (curl_cffi impersonate ayarını kontrol et)")
+            if "Just a moment" in r.text or "Enable JavaScript" in r.text:
+                print("[FATAL] Cloudflare engeli aşılamadı.")
                 return False
 
-            # Regex ile tokenları bul
-            ckey = re.search(r'name="cKey" value="([^"]+)"', r.text)
-            cvalue = re.search(r'name="cValue" value="([^"]+)"', r.text)
+            # cKey ve cValue'yu HTML içinden çek
+            ckey_match = re.search(r'name="cKey" value="([^"]+)"', r.text)
+            cvalue_match = re.search(r'name="cValue" value="([^"]+)"', r.text)
 
-            if ckey and cvalue:
-                self.cKey = ckey.group(1)
-                self.cValue = cvalue.group(1)
-                print("[OK] Tokenlar alındı.")
+            if ckey_match and cvalue_match:
+                self.cKey = ckey_match.group(1)
+                self.cValue = cvalue_match.group(1)
+                print(f"[OK] Tokenlar alındı. Oturum açık.")
                 return True
             else:
-                print("[FATAL] Tokenlar (cKey/cValue) sayfada bulunamadı.")
-                # Bazen site yapısı değişmiş olabilir, HTML'i debug etmek gerekebilir
-                # print(r.text[:500]) 
+                print("[FATAL] Tokenlar (cKey/cValue) sayfada bulunamadı. Site yapısı değişmiş olabilir.")
                 return False
         except Exception as e:
             print(f"[FATAL] Bağlantı hatası: {e}")
             return False
 
     def get_category_content(self, cat_id):
-        """API'ye POST isteği atarak kategori içeriğini çeker."""
         if not self.cKey: return []
         
         url = f"{self.domain}/bg/getserielistbychannel"
-        
-        # Smali kodundaki form data yapısı
         data = {
             "cKey": self.cKey,
             "cValue": self.cValue,
@@ -129,8 +112,6 @@ class DiziScraper:
             "channelId": cat_id,
             "languageId": "2,3,4"
         }
-        
-        # Headers (Ajax isteği olduğu belirtilmeli)
         headers = {
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{self.domain}/",
@@ -143,11 +124,8 @@ class DiziScraper:
                 try:
                     js = r.json()
                     html = js.get('data', {}).get('html', '')
-                    
-                    # Basit Regex ile HTML içinden linkleri ve isimleri al
-                    # Örnek HTML: <a href="https://..." class="..."> ... <div class="...">Dizi Adı</div>
                     items = []
-                    # Bu regex HTML yapısına göre hassastır, genel bir yakalama yapalım
+                    # Regex ile linkleri ve başlıkları al
                     matches = re.findall(r'href="([^"]+)".*?text-white text-sm">([^<]+)', html, re.DOTALL)
                     
                     for link, title in matches:
@@ -156,25 +134,21 @@ class DiziScraper:
                     
                     return items
                 except:
-                    print(f"[!] JSON parse hatası ({cat_id})")
-        except Exception as e:
-            print(f"[!] Kategori çekme hatası: {e}")
+                    pass
+        except:
+            pass
         return []
 
     def get_video_source(self, url):
-        """Dizi/Film sayfasındaki şifreli veriyi çözer ve linki bulur."""
         try:
             r = self.session.get(url, timeout=15)
-            
-            # Smali: data-rm-k özniteliğini arar
+            # Şifreli JSON verisini bul
             match = re.search(r'data-rm-k=["\'](.*?)["\']', r.text)
             
             if match:
-                json_str = match.group(1)
-                # HTML entity'leri temizle (&quot; -> ")
-                json_str = json_str.replace('&quot;', '"')
-                
+                json_str = match.group(1).replace('&quot;', '"')
                 data = json.loads(json_str)
+                
                 salt = data.get('salt')
                 iv = data.get('iv')
                 ciphertext = data.get('ciphertext')
@@ -182,8 +156,7 @@ class DiziScraper:
                 if salt and iv and ciphertext:
                     decrypted = self.crypto.decrypt(salt, iv, ciphertext)
                     if decrypted:
-                        # Decrypted veri genellikle bir iframe HTML'idir
-                        # <iframe src="https://..." ...>
+                        # İframe linkini bul
                         iframe_match = re.search(r'src="([^"]+)"', decrypted)
                         if iframe_match:
                             return self.resolve_iframe(iframe_match.group(1))
@@ -192,49 +165,48 @@ class DiziScraper:
         return None
 
     def resolve_iframe(self, iframe_url):
-        """Iframe linkine gidip gerçek m3u8/mp4'ü bulur."""
         try:
             if not iframe_url.startswith("http"):
                 iframe_url = f"{self.domain}{iframe_url}"
             
-            # Iframe'e git (Referer önemli)
             r = self.session.get(iframe_url, headers={"Referer": self.domain}, timeout=15)
             
-            # 1. Yöntem: file: "..."
-            match = re.search(r'file:\s*["\']([^"\']+)["\']', r.text)
+            # .m3u8 veya .mp4 linki ara
+            match = re.search(r'file:\s*["\']([^"\']+\.(?:m3u8|mp4))["\']', r.text)
             if match: return match.group(1)
             
-            # 2. Yöntem: source: "..."
+            # Alternatif "source" parametresi
             match = re.search(r'source:\s*["\']([^"\']+)["\']', r.text)
             if match: return match.group(1)
-
+            
         except:
             pass
         return None
 
 def worker(scraper, item, category):
-    """Thread worker fonksiyonu"""
-    link = scraper.get_video_source(item['url'])
-    if link and link.startswith("http"):
-        # M3U Formatı
-        return (
-            f'#EXTINF:-1 group-title="{category}",{item["title"]}\n'
-            f'#EXTVLCOPT:http-user-agent=Mozilla/5.0\n'
-            f'#EXTVLCOPT:http-referrer={scraper.domain}/\n'
-            f'{link}\n'
-        )
+    try:
+        link = scraper.get_video_source(item['url'])
+        if link and link.startswith("http"):
+            entry = f'#EXTINF:-1 group-title="{category}",{item["title"]}\n'
+            entry += f'#EXTVLCOPT:http-user-agent=Mozilla/5.0\n'
+            entry += f'#EXTVLCOPT:http-referrer={scraper.domain}/\n'
+            entry += f'{link}\n'
+            return entry
+    except:
+        pass
     return None
 
 def main():
     print("--- DiziPal Sync Başlatıldı ---")
     scraper = DiziScraper()
     
+    # HATA DÜZELTİLDİ: Fonksiyon adı init_session olarak çağrılıyor
     if not scraper.init_session():
+        print("[FATAL] Oturum açılamadı.")
         sys.exit(1)
 
     playlist_data = []
     
-    # ThreadPool ile hızlı tarama
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
         
@@ -257,7 +229,6 @@ def main():
             if completed % 10 == 0:
                 print(f"    İlerleme: {completed}/{len(futures)}")
 
-    # Kaydet
     if playlist_data:
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
